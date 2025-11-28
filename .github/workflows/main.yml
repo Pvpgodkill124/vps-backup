@@ -1,136 +1,68 @@
-name: RDP
+name: Minecraft Server Runner
 
 on:
+  # Triggers the workflow on a manual dispatch (button click in the GitHub Actions tab)
   workflow_dispatch:
-  # optional schedule:
+    inputs:
+      version:
+        description: 'Minecraft Version'
+        required: true
+        default: '1.21.8'
+  
+  # Optional: Triggers a restart every 6 hours (e.g., at 00:00, 06:00, 12:00, 18:00 UTC)
+  # You must still manually handle the world data persistence!
   # schedule:
-  #   - cron: "0 */6 * * *"  # every 6 hours
+  #   - cron: '0 */6 * * *' 
 
 jobs:
-  secure-rdp:
-    runs-on: windows-latest
-    # GitHub Windows runner maximum 360 minutes (6 hours)
-    timeout-minutes: 360
-
+  run-server:
+    # Use a high-spec runner if available for better performance
+    runs-on: ubuntu-latest
+    
+    # Optional: Configure a higher RAM/CPU runner if you have access to larger runners
+    # runs-on: ubuntu-latest-8-cores
+    
     steps:
-      - name: Configure Core RDP Settings
-        shell: pwsh
-        run: |
-          # Enable RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-             -Name "fDenyTSConnections" -Value 0 -Force
-          # Disable NLA to simplify connection
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-             -Name "SecurityLayer" -Value 0 -Force
+    - name: ⬇️ Checkout Repository
+      uses: actions/checkout@v4
 
-          # Firewall rule
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
+    - name: ☕ Setup Java
+      # Minecraft servers require Java. This action sets it up.
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '21' # Adjust based on Minecraft version
 
-          # Restart RDP service
-          Restart-Service -Name TermService -Force
+    - name: ⚙️ Setup Minecraft Server Files
+      # Download server files, eula.txt, and server.properties
+      run: |
+        # Download your preferred server jar (e.g., PaperMC)
+        # Replace the URL with the correct one for your chosen server type/version
+        wget -O server.jar "https://fill-data.papermc.io/v1/objects/8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e/paper-1.21.8-60.jar" 
+        
+        # Accept the EULA (Crucial step!)
+        echo "eula=true" > eula.txt
+        
+        # (Optional) Download and set up your world and config from Artifacts/other storage
+        # ...
 
-      - name: Relax password complexity (temporary)
-        shell: pwsh
-        run: |
-          Write-Host "Exporting current security policy..."
-          secedit /export /cfg C:\secpol_orig.cfg | Out-Null
-          secedit /export /cfg C:\secpol.cfg | Out-Null
-          (Get-Content C:\secpol.cfg) -replace 'PasswordComplexity = 1','PasswordComplexity = 0' `
-                                     -replace 'MinimumPasswordLength = \d+','MinimumPasswordLength = 1' `
-                                     -replace 'PasswordHistorySize = \d+','PasswordHistorySize = 0' `
-                                     | Set-Content C:\secpol_mod.cfg
-          Write-Host "Applying modified security policy..."
-          secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol_mod.cfg /areas SECURITYPOLICY | Out-Null
-          Write-Host "Password policy relaxed (may be temporary until reboot)."
+    - name: 🌍 Install and Start Tunneling Service (e.g., playit.gg or ngrok)
+      # A tunneling service is required to make the server publicly accessible.
+      # This step would install and run the tunnel in the background.
+      run: |
+        # Example for a tunneling tool (Actual commands will vary)
+        echo "Starting tunneling service..."
+        # Example: ./playit_cli start --secret ${{ secrets.PLAYIT_SECRET }} &
 
-      - name: Create (or recreate) DR1 user with fixed password
-        shell: pwsh
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        run: |
-          if (-not $env:RDP_PASSWORD) {
-            Write-Error "RDP_PASSWORD secret not set. Please set it to the fixed password (e.g., DR1RDP1)."
-            exit 1
-          }
-
-          $username = "DR1"
-          Write-Host "Ensuring user $username does not already exist (will remove if present)..."
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-            Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 1
-          }
-
-          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-
-          Write-Host "User $username created. (Password provided via secret)"
-
-      - name: Install Tailscale
-        shell: pwsh
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
-        shell: pwsh
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          if (-not $env:TAILSCALE_AUTH_KEY) {
-            Write-Error "TAILSCALE_AUTH_KEY secret not set."
-            exit 1
-          }
-
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-            $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4).Trim()
-            Start-Sleep -Seconds 5
-            $retries++
-          }
-          if (-not $tsIP) {
-            Write-Error "Tailscale IP not assigned. Exiting."
-            exit 1
-          }
-          Write-Host "Assigned Tailscale IP: $tsIP"
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-      - name: Verify RDP Accessibility
-        shell: pwsh
-        run: |
-          Write-Host "Testing TCP connection to $env:TAILSCALE_IP:3389 ..."
-          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
-          if (-not $test.TcpTestSucceeded) {
-            Write-Error "TCP connection to RDP port failed. Exiting."
-            exit 1
-          }
-          Write-Host "RDP reachable via Tailscale IP."
-
-      - name: Output connection info (do not print password)
-        shell: pwsh
-        run: |
-          Write-Host "=== RDP ACCESS INFO ==="
-          Write-Host "Username: DR1"
-          Write-Host "Password: stored in repo secret RDP_PASSWORD (set to DR1RDP1 if you chose that)"
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Use the Windows PC Connection app or Tailscale to connect to $env:TAILSCALE_IP:3389 (username DR1)."
-          Write-Host "======================="
-
-      - name: Keep runner active
-        shell: pwsh
-        run: |
-          Write-Host "Runner will stay alive until timeout. Cancel the workflow to stop sooner."
-          while ($true) {
-            Start-Sleep -Seconds 300
-            Write-Host "Still alive: $(Get-Date)"
-          }
+    - name: 🚀 Start Minecraft Server (Runs for up to 6 hours)
+      # The server runs in the foreground. The job will block here until timeout.
+      run: |
+        echo "Starting Minecraft Server. Job will terminate in ~6 hours."
+        java -Xms4G -Xmx8G -jar server.jar nogui
+        
+    - name: 💾 Save World Data (If server shut down cleanly)
+      # Upload the world data as an Artifact so it can be restored on the next run
+      uses: actions/upload-artifact@v4
+      with:
+        name: minecraft-world-data
+        path: world_folder_name/ # Replace with the actual world folder name
