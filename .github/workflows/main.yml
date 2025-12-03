@@ -128,9 +128,9 @@ jobs:
           # We assume the main web service (like Pterodactyl Panel) is listening on port 8080 or 80.
           # You MUST replace '8080' with the actual internal port of the service you want to expose.
           echo "Starting Tailscale Funnel on port 80..."
-          sudo tailscale funnel 80 on &
+          sudo tailscale funnel 8080 on &
 
-         sleep 5
+          sleep 5
 
       - name: 🔨 Configure Root User and SSH Access
         run: |
