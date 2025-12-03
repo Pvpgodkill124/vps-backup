@@ -205,29 +205,40 @@ jobs:
           
           zip -r backup.zip /opt/vps-backup
  
-      - name: 💾 Store Backup on 'backup' Branch (Permanent Storage)
-  if: always()
-  run: |
-    echo "::group::Pushing backup to Git branch"
-    BACKUP_REPO_DIR=./backup-commit-repo
-    
-    git config --global user.email "actions@github.com"
-    git config --global user.name "GitHub Actions Backup"
-    
-    # --- CHANGE 1: Clone using the built-in token ---
-    # The token is automatically available in the environment.
-    git clone --single-branch --branch backup https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
-    git clone https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
-    
-    cd ${BACKUP_REPO_DIR}
-    git checkout backup || git checkout -b backup
-    
-    cp ../backup.zip .
-    git add backup.zip
-    git commit -m "Automated backup from workflow run ${{ github.run_id }}" || echo "No changes to commit."
-    
-    # --- CHANGE 2: Push using the built-in token's URL ---
-    # We use a special URL that authenticates the push with the workflow's built-in permissions.
-    git push https://${{ github.actor }}:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git HEAD:backup
-    
-    echo "::endgroup::"
+      # ⚠️ IMPORTANT: Ensure the step BEFORE this one successfully creates 'backup.zip' 
+      # in the root of your repository workspace. (Your current setup does this.)
+      
+      # 1. Create a Pull Request with the new backup file
+      - name: 🔄 Create Pull Request with Backup
+        id: cpr
+        uses: peter-evans/create-pull-request@v6
+        if: always() # Run even if the session failed, as long as backup.zip exists
+        with:
+          # Use your custom token for push/PR permissions
+          token: ${{ secrets.GH_TOKEN }} 
+          commit-message: '🤖 Automated Backup: Workflow ${{ github.run_id }}'
+          title: 'Auto-Merge Backup: Workflow ${{ github.run_id }}'
+          # Create a unique temporary branch for the PR source
+          branch: backup-auto-merge-${{ github.run_id }} 
+          base: backup # The target branch where the backup permanently resides
+          body: |
+            Automated workflow run created a new backup.
+            This Pull Request will be merged automatically.
+          # The backup.zip file in the root will be added to the commit
+          add-paths: backup.zip 
+
+      # 2. Immediately Merge the Pull Request
+      - name: ✅ Auto-Merge the Pull Request
+        if: steps.cpr.outputs.pull-request-number != '' # Only runs if a PR was created
+        run: |
+          PR_NUMBER=${{ steps.cpr.outputs.pull-request-number }}
+          echo "Attempting to merge PR #${PR_NUMBER}..."
+          
+          # Use GitHub CLI (pre-installed) to merge the PR
+          # --squash combines all commits into one clean history entry
+          # --delete-branch removes the temporary branch after merging
+          # --admin is required if the branch has protection rules
+          gh pr merge "$PR_NUMBER" --squash --delete-branch --admin
+        env:
+          # Pass your custom token for gh CLI authentication
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
