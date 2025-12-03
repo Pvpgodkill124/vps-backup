@@ -1,0 +1,233 @@
+name: VPS 24/7
+ 
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Runs every 6 hours
+  workflow_dispatch:
+ 
+jobs:
+  vps-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # Just under 6 hours
+ 
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }} 
+          
+  
+      - name: 鈿欙笍 Install Core System Prerequisites (Including MariaDB Server)
+        run: |
+          sudo hostnamectl set-hostname root
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server
+ 
+      - name: 馃摝 Retrieve Previous Backup from 'backup' Branch
+        run: |
+          echo "::group::Retrieving backup from Git branch"
+          BACKUP_REPO_DIR=./backup/repo
+          git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
+          git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
+          
+          if [ -f ${BACKUP_REPO_DIR}/backup.zip ];
+          then
+            mkdir -p ./backup
+            mv ${BACKUP_REPO_DIR}/backup.zip ./backup/backup.zip
+            echo "Backup file retrieved successfully."
+          else
+            echo "No backup file found on 'backup' branch."
+          fi
+          
+          rm -rf ${BACKUP_REPO_DIR}
+          echo "::endgroup::"
+          
+      - name: Restore Files and Tailscale State
+        run: |
+          echo "Restoring previous session files..."
+          if [ -f ./backup/backup.zip ];
+          then
+            unzip -o ./backup/backup.zip -d /
+            echo "Session files restored."
+            # Restoration Checks
+            if [ -d /opt/vps-backup/data/root_home ];
+            then
+                sudo cp -a /opt/vps-backup/data/root_home/. /root/
+            fi
+            if [ -d /opt/vps-backup/data/pterodactyl_panel ];
+            then
+                sudo cp -a /opt/vps-backup/data/pterodactyl_panel/. /var/www/pterodactyl/
+            fi
+            if [ -d /opt/vps-backup/data/pterodactyl_wings ];
+            then
+                sudo cp -a /opt/vps-backup/data/pterodactyl_wings/. /var/lib/pterodactyl/
+            fi
+          else
+            echo "No backup found, starting fresh."
+          fi
+          
+          # Restore Tailscale state 
+          if [ -f /opt/vps-backup/data/tailscaled.state ];
+          then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            echo "Tailscale state restored."
+          fi
+ 
+      # --- Networking tools split into separate, stable steps ---
+      
+      - name: 馃寪 Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
+        
+      - name: 鈽侊笍 Install Cloudflared
+        run: |
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          sudo install cloudflared /usr/local/bin/cloudflared
+          
+      - name: 馃殌 Install Playit.gg Agent (PPA Method for Stability)
+        run: |
+          echo "Setting up Playit.gg PPA..."
+          # 1. Download and trust the GPG key
+          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null
+          # 2. Add the Playit APT repository source
+          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit-cloud.list
+          # 3. Update APT and install the package
+          sudo apt update
+          sudo apt install -y playit
+          
+      # --- End of Installation Steps ---
+
+      - name: 馃摗 Start Networking Services & Database
+        run: |
+          # Start Database
+          sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
+          # Restore Pterodactyl Database
+          if [ -f /opt/vps-backup/data/pterodactyl_db.sql ];
+          then
+              echo "Re-importing Pterodactyl database..."
+              sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
+          fi
+          
+          # Start Tailscale with the --reset fix for persistent 'root' name
+          sudo tailscaled &
+          sleep 8
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || echo "Tailscale already up/error"
+          
+          # Start Cloudflare Tunnel (Token is sanitized)
+          CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
+          sudo /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
+          echo "Cloudflare Tunnel started."
+          
+          # Start Playit.gg for Static Minecraft Access
+          echo "Starting Playit.gg daemon..."
+          playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & 
+          
+
+           # --- NEW: START TAILSCALE FUNNEL ---
+          # We assume the main web service (like Pterodactyl Panel) is listening on port 8080 or 80.
+          # You MUST replace '8080' with the actual internal port of the service you want to expose.
+          echo "Starting Tailscale Funnel on port 80..."
+          sudo tailscale funnel 8080 on &
+
+          sleep 5
+
+      - name: 馃敤 Configure Root User and SSH Access
+        run: |
+          curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root -o /tmp/root_setup.sh
+          chmod +x /tmp/root_setup.sh
+          sudo /tmp/root_setup.sh
+          echo "root:root" | sudo chpasswd
+          echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/root
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh || echo "SSH restart failed, continuing."
+
+      - name: Start Tmate Server (Non-Blocking)
+        run: |
+          tmate -S /tmp/tmate.sock new-session -d
+ 
+      - name: 馃攽 VPS Connection Details (Ultimate Access)
+        run: |
+          echo "=========================================="
+          echo "鈽侊笍 STATIC PTERODACTYL/WEB ACCESS (Cloudflare Tunnel)"
+          echo "  ---> panel.pvgo.qzz.io (or your custom domain) <---"
+          echo "馃殌 STATIC MINECRAFT/GAMING ACCESS (Playit.gg)"
+          echo "  ---> Check your Playit.gg dashboard for the public IP/Domain <---"
+          echo "------------------------------------------"
+          echo "馃捇 Tailscale MagicDNS Name (Should now be stable): root"
+          echo "馃敘 Tailscale IP (Internal VPN):"
+          tailscale ip -4 || echo "Tailscale IP not found"
+          echo "=========================================="
+ 
+      - name: Sleep to Keep VPS Alive (6 Hours)
+        run: sleep 21600
+ 
+      # --- CANCELLATION-SAFE BACKUP STEPS ---
+      - name: 馃摝 Create Backup Archive (Pterodactyl & Root Data)
+        if: always()
+        run: |
+          sudo mkdir -p /opt/vps-backup/data/root_home
+          
+          echo "Attempting to dump Pterodactyl database..."
+          sudo systemctl start mariadb 2>/dev/null || true
+          
+          # Attempt dump (non-critical if DB is not set up, using 2>/dev/null to silence errors)
+          sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > /opt/vps-backup/data/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED (Expected if database is not fully set up). Continuing."
+          
+          echo "Copying Pterodactyl files (if present)..."
+          sudo mkdir -p /opt/vps-backup/data/pterodactyl_panel
+          if [ -d /var/www/pterodactyl ];
+          then
+            sudo cp -a /var/www/pterodactyl/. /opt/vps-backup/data/pterodactyl_panel/
+          else
+            echo "/var/www/pterodactyl not found. Skipping panel file backup."
+          fi
+          
+          echo "Copying Pterodactyl Wings/Server data (if present)..."
+          sudo mkdir -p /opt/vps-backup/data/pterodactyl_wings
+          if [ -d /var/lib/pterodactyl ];
+          then
+            sudo cp -a /var/lib/pterodactyl/. /opt/vps-backup/data/pterodactyl_wings/
+          else
+            echo "/var/lib/pterodactyl not found. Skipping wings data backup."
+          fi
+
+          echo "Copying /root directory contents..."
+          sudo cp -a /root/. /opt/vps-backup/data/root_home/
+          
+          # Backup Tailscale state
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+          
+          # Cleanup cache/temporary files before zipping
+          sudo rm -rf /opt/vps-backup/data/root_home/.cache /opt/vps-backup/data/root_home/.tmate.sock /opt/vps-backup/data/root_home/.bash_history
+          sudo chown -R $USER:$USER /opt/vps-backup
+          
+          zip -r backup.zip /opt/vps-backup
+ 
+      - name: 💾 Store Backup on 'backup' Branch (Permanent Storage)
+  if: always()
+  run: |
+    echo "::group::Pushing backup to Git branch"
+    BACKUP_REPO_DIR=./backup-commit-repo
+    
+    git config --global user.email "actions@github.com"
+    git config --global user.name "GitHub Actions Backup"
+    
+    # --- CHANGE 1: Clone using the built-in token ---
+    # The token is automatically available in the environment.
+    git clone --single-branch --branch backup https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
+    git clone https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
+    
+    cd ${BACKUP_REPO_DIR}
+    git checkout backup || git checkout -b backup
+    
+    cp ../backup.zip .
+    git add backup.zip
+    git commit -m "Automated backup from workflow run ${{ github.run_id }}" || echo "No changes to commit."
+    
+    # --- CHANGE 2: Push using the built-in token's URL ---
+    # We use a special URL that authenticates the push with the workflow's built-in permissions.
+    git push https://${{ github.actor }}:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git HEAD:backup
+    
+    echo "::endgroup::"
