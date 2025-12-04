@@ -16,17 +16,17 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }} 
           
-  
-      - name: 鈿欙笍 Install Core System Prerequisites (Including MariaDB Server)
+      - name: ⚙️ Install Core System Prerequisites (Including MariaDB Server)
         run: |
           sudo hostnamectl set-hostname root
           sudo apt update
           sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server
  
-      - name: 馃摝 Retrieve Previous Backup from 'backup' Branch
+      - name: 📦 Retrieve Previous Backup from 'backup' Branch
         run: |
           echo "::group::Retrieving backup from Git branch"
           BACKUP_REPO_DIR=./backup/repo
+          # Clones backup branch using two methods for robustness
           git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
           git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
           
@@ -42,26 +42,57 @@ jobs:
           rm -rf ${BACKUP_REPO_DIR}
           echo "::endgroup::"
           
-      - name: Restore Files and Tailscale State
+      - name: 🔄 Restore Files and Tailscale State (FULL PERSISTENCE)
         run: |
           echo "Restoring previous session files..."
           if [ -f ./backup/backup.zip ];
           then
             unzip -o ./backup/backup.zip -d /
             echo "Session files restored."
-            # Restoration Checks
+            
+            # --- START RESTORATION OF PERSISTENT FOLDERS ---
+            
+            # Restore /root home
             if [ -d /opt/vps-backup/data/root_home ];
             then
                 sudo cp -a /opt/vps-backup/data/root_home/. /root/
             fi
+            
+            # Restore Pterodactyl Panel files (/var/www/pterodactyl)
             if [ -d /opt/vps-backup/data/pterodactyl_panel ];
             then
+                sudo mkdir -p /var/www/pterodactyl
                 sudo cp -a /opt/vps-backup/data/pterodactyl_panel/. /var/www/pterodactyl/
             fi
+            
+            # Restore Pterodactyl Wings data (/var/lib/pterodactyl)
             if [ -d /opt/vps-backup/data/pterodactyl_wings ];
             then
+                sudo mkdir -p /var/lib/pterodactyl
                 sudo cp -a /opt/vps-backup/data/pterodactyl_wings/. /var/lib/pterodactyl/
             fi
+            
+            # Restore Nginx Configuration
+            if [ -d /opt/vps-backup/data/etc_nginx ]; then
+                echo "Restoring Nginx configuration..."
+                sudo cp -a /opt/vps-backup/data/etc_nginx/. /etc/nginx/
+            fi
+            
+            # Restore PHP Configuration
+            if [ -d /opt/vps-backup/data/etc_php ]; then
+                echo "Restoring PHP configuration..."
+                sudo cp -a /opt/vps-backup/data/etc_php/. /etc/php/
+            fi
+            
+            # Restore Custom Systemd Service Files (like wings.service)
+            if [ -d /opt/vps-backup/data/etc_systemd ]; then
+                echo "Restoring systemd service files..."
+                sudo cp -a /opt/vps-backup/data/etc_systemd/. /etc/systemd/system/
+                sudo systemctl daemon-reload # Reload daemon after restoring service files
+            fi
+            
+            # --- END RESTORATION OF PERSISTENT FOLDERS ---
+
           else
             echo "No backup found, starting fresh."
           fi
@@ -77,15 +108,15 @@ jobs:
  
       # --- Networking tools split into separate, stable steps ---
       
-      - name: 馃寪 Install Tailscale
+      - name: 🌐 Install Tailscale
         run: curl -fsSL https://tailscale.com/install.sh | sh
         
-      - name: 鈽侊笍 Install Cloudflared
+      - name: ⭐ Install Cloudflared
         run: |
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           sudo install cloudflared /usr/local/bin/cloudflared
           
-      - name: 馃殌 Install Playit.gg Agent (PPA Method for Stability)
+      - name: 🎮 Install Playit.gg Agent (PPA Method for Stability)
         run: |
           echo "Setting up Playit.gg PPA..."
           # 1. Download and trust the GPG key
@@ -98,10 +129,11 @@ jobs:
           
       # --- End of Installation Steps ---
 
-      - name: 馃摗 Start Networking Services & Database
+      - name: 🚀 Start Networking Services & Database
         run: |
           # Start Database
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
+          
           # Restore Pterodactyl Database
           if [ -f /opt/vps-backup/data/pterodactyl_db.sql ];
           then
@@ -124,15 +156,14 @@ jobs:
           playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & 
           
 
-           # --- NEW: START TAILSCALE FUNNEL ---
-          # We assume the main web service (like Pterodactyl Panel) is listening on port 8080 or 80.
+          # --- NEW: START TAILSCALE FUNNEL ---
           # You MUST replace '8080' with the actual internal port of the service you want to expose.
           echo "Starting Tailscale Funnel on port 80..."
           sudo tailscale funnel 8080 on &
 
           sleep 5
 
-      - name: 馃敤 Configure Root User and SSH Access
+      - name: 🔑 Configure Root User and SSH Access
         run: |
           curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root -o /tmp/root_setup.sh
           chmod +x /tmp/root_setup.sh
@@ -147,16 +178,16 @@ jobs:
         run: |
           tmate -S /tmp/tmate.sock new-session -d
  
-      - name: 馃攽 VPS Connection Details (Ultimate Access)
+      - name: 📣 VPS Connection Details (Ultimate Access)
         run: |
           echo "=========================================="
-          echo "鈽侊笍 STATIC PTERODACTYL/WEB ACCESS (Cloudflare Tunnel)"
+          echo "⭐ STATIC PTERODACTYL/WEB ACCESS (Cloudflare Tunnel)"
           echo "  ---> panel.pvgo.qzz.io (or your custom domain) <---"
-          echo "馃殌 STATIC MINECRAFT/GAMING ACCESS (Playit.gg)"
+          echo "🎮 STATIC MINECRAFT/GAMING ACCESS (Playit.gg)"
           echo "  ---> Check your Playit.gg dashboard for the public IP/Domain <---"
           echo "------------------------------------------"
-          echo "馃捇 Tailscale MagicDNS Name (Should now be stable): root"
-          echo "馃敘 Tailscale IP (Internal VPN):"
+          echo "📍 Tailscale MagicDNS Name (Should now be stable): root"
+          echo "💻 Tailscale IP (Internal VPN):"
           tailscale ip -4 || echo "Tailscale IP not found"
           echo "=========================================="
  
@@ -164,7 +195,7 @@ jobs:
         run: sleep 21600
  
       # --- CANCELLATION-SAFE BACKUP STEPS ---
-      - name: 馃摝 Create Backup Archive (Pterodactyl & Root Data)
+      - name: 💾 Create Backup Archive (FULL CONFIGURATION PERSISTENCE)
         if: always()
         run: |
           sudo mkdir -p /opt/vps-backup/data/root_home
@@ -172,10 +203,12 @@ jobs:
           echo "Attempting to dump Pterodactyl database..."
           sudo systemctl start mariadb 2>/dev/null || true
           
-          # Attempt dump (non-critical if DB is not set up, using 2>/dev/null to silence errors)
+          # Attempt dump (non-critical if DB is not set up)
           sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > /opt/vps-backup/data/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED (Expected if database is not fully set up). Continuing."
           
-          echo "Copying Pterodactyl files (if present)..."
+          # --- START BACKUP OF CORE FOLDERS ---
+          
+          echo "Copying Pterodactyl Panel files (if present)..."
           sudo mkdir -p /opt/vps-backup/data/pterodactyl_panel
           if [ -d /var/www/pterodactyl ];
           then
@@ -192,7 +225,27 @@ jobs:
           else
             echo "/var/lib/pterodactyl not found. Skipping wings data backup."
           fi
-
+          
+          echo "Copying Nginx Configuration..."
+          sudo mkdir -p /opt/vps-backup/data/etc_nginx
+          if [ -d /etc/nginx ]; then
+            sudo cp -a /etc/nginx/. /opt/vps-backup/data/etc_nginx/
+          fi
+          
+          echo "Copying PHP Configuration..."
+          sudo mkdir -p /opt/vps-backup/data/etc_php
+          if [ -d /etc/php ]; then
+            sudo cp -a /etc/php/. /opt/vps-backup/data/etc_php/
+          fi
+          
+          echo "Copying Custom Systemd Service Files..."
+          sudo mkdir -p /opt/vps-backup/data/etc_systemd
+          if [ -d /etc/systemd/system ]; then
+            sudo cp -a /etc/systemd/system/. /opt/vps-backup/data/etc_systemd/
+          fi
+          
+          # --- END BACKUP OF CORE FOLDERS ---
+          
           echo "Copying /root directory contents..."
           sudo cp -a /root/. /opt/vps-backup/data/root_home/
           
@@ -205,40 +258,29 @@ jobs:
           
           zip -r backup.zip /opt/vps-backup
  
-      # ⚠️ IMPORTANT: Ensure the step BEFORE this one successfully creates 'backup.zip' 
-      # in the root of your repository workspace. (Your current setup does this.)
-      
       # 1. Create a Pull Request with the new backup file
-      - name: 🔄 Create Pull Request with Backup
+      - name: 🔄 Create Pull Request with Backup (Auto-Merge Start)
         id: cpr
         uses: peter-evans/create-pull-request@v6
-        if: always() # Run even if the session failed, as long as backup.zip exists
+        if: always()
         with:
-          # Use your custom token for push/PR permissions
           token: ${{ secrets.GH_TOKEN }} 
           commit-message: '🤖 Automated Backup: Workflow ${{ github.run_id }}'
           title: 'Auto-Merge Backup: Workflow ${{ github.run_id }}'
-          # Create a unique temporary branch for the PR source
           branch: backup-auto-merge-${{ github.run_id }} 
-          base: backup # The target branch where the backup permanently resides
+          base: backup 
           body: |
             Automated workflow run created a new backup.
             This Pull Request will be merged automatically.
-          # The backup.zip file in the root will be added to the commit
           add-paths: backup.zip 
 
       # 2. Immediately Merge the Pull Request
-      - name: ✅ Auto-Merge the Pull Request
-        if: steps.cpr.outputs.pull-request-number != '' # Only runs if a PR was created
+      - name: ✅ Auto-Merge the Pull Request (Human-Free Backup)
+        if: steps.cpr.outputs.pull-request-number != ''
         run: |
           PR_NUMBER=${{ steps.cpr.outputs.pull-request-number }}
           echo "Attempting to merge PR #${PR_NUMBER}..."
           
-          # Use GitHub CLI (pre-installed) to merge the PR
-          # --squash combines all commits into one clean history entry
-          # --delete-branch removes the temporary branch after merging
-          # --admin is required if the branch has protection rules
           gh pr merge "$PR_NUMBER" --squash --delete-branch --admin
         env:
-          # Pass your custom token for gh CLI authentication
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
