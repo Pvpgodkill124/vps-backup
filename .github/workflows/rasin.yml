@@ -135,13 +135,7 @@ jobs:
           # Install Cloudflared
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           install cloudflared /usr/local/bin/cloudflared
-          
-          # Install Playit.gg Agent (PPA method works on Debian/Ubuntu derivatives)
-          echo "Setting up Playit.gg PPA..."
-          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null
-          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | tee /etc/apt/sources.list.d/playit-cloud.list
-          apt update -y
-          apt install -y playit
+        
           
       - name: 🔑 Configure Root User and SSH Access
         run: |
@@ -176,9 +170,7 @@ jobs:
           # Start Cloudflare Tunnel
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
           /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
-          
-          # Start Playit.gg
-          playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & 
+           
           
           # Start Tailscale Funnel
           echo "Starting Tailscale Funnel on port 80..."
