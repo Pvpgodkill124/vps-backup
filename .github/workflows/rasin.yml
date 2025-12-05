@@ -7,26 +7,24 @@ on:
 
 jobs:
   vps-session:
-    # Use the standard GitHub runner (Ubuntu) to host the container
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
-    # Using Debian 11 (Bullseye) slim container as requested
     container: debian:bullseye-slim
 
     steps:
+      # NOTE: This runs on the host (ubuntu-latest) and sets up the git workspace
       - name: ⬇️ Checkout Repository
-        # Crucial for the push step later: We must clone the main branch initially.
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_TOKEN }}
 
+      # 🔑 FIX 1: Install 'sudo' package inside the minimal container
       - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory (Inside Debian 11)
         run: |
-          # The runner user is typically root inside the container
+          # Install 'sudo' here to resolve "sudo: not found" error when accessing host-level resources
           apt update -y
-          # Install core tools (zip, git, tmate, mariadb client/server)
-          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip
+          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo
 
           # Configure hostname
           hostnamectl set-hostname root || true
@@ -39,16 +37,14 @@ jobs:
           mkdir -p "${BACKUP_DATA_DIR}"
  
       - name: 📦 Retrieve Previous Backup from 'backup' Branch
-        # This step is the key area for the race condition. It must clone the LATEST backup.
+        # Use a separate job step to explicitly fetch the backup branch files
         run: |
           echo "::group::Retrieving backup from Git branch"
           BACKUP_REPO_DIR=./backup/repo
           
-          # Use a clean clone directly into a local temp directory
-          # The 'backup' branch is the source of truth for the latest data.
+          # Clone backup branch
           git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
           git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
-          
           if [ -f ${BACKUP_REPO_DIR}/backup.zip ];
           then
             mkdir -p ./backup
@@ -215,12 +211,14 @@ jobs:
           
           # --- DUMP DATABASE ---
           echo "Attempting to dump Pterodactyl database..."
+          # No change here, systemctl still needs sudo/host context
           sudo systemctl start mariadb 2>/dev/null || true
-          # Note: mysqldump runs inside the Debian container
           mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED. Continuing."
           
           # --- START COPYING AND BACKUP UP ---
-          
+          # All 'cp' commands no longer need 'sudo' as we are root inside the container,
+          # but the host-level copies need it (Nginx/Systemd)
+
           # 1. /root/ contents
           echo "Copying /root directory contents..."
           mkdir -p ${BACKUP_DATA_DIR}/root_home
@@ -255,29 +253,30 @@ jobs:
           cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/
 
           # 6. Nginx/Systemd configs (Requires sudo to copy from runner's system paths)
+          # These paths are on the host OS, so 'sudo' is required.
           sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd
           if [ -d /etc/nginx ]; then sudo cp -a /etc/nginx/. ${BACKUP_DATA_DIR}/etc_nginx/; fi
           if [ -d /etc/systemd/system ]; then sudo cp -a /etc/systemd/system/. ${BACKUP_DATA_DIR}/etc_systemd/; fi
 
           # --- CLEANUP AND ZIP ---
           
-          # Cleanup cache/temporary files before zipping
+          # Cleanup cache/temporary files before zipping (no sudo needed)
           rm -rf ${BACKUP_DATA_DIR}/root_home/.cache ${BACKUP_DATA_DIR}/root_home/.tmate.sock ${BACKUP_DATA_DIR}/root_home/.bash_history
           
-          # Set ownership back to runner user (not container root) for zip utility if needed
-          sudo chown -R $USER:$USER ${BACKUP_DIR}
+          # Set ownership back to runner user for the host to handle the file (no sudo needed, as we are root)
+          chown -R $USER:$USER ${BACKUP_DIR}
           
-          # Create the final zip archive of the entire staging directory
-          zip -r backup.zip ${BACKUP_DIR}
+          # 🔑 FIX 2: Create the final zip archive *directly in the $GITHUB_WORKSPACE* # which is the current working directory, for the push action to find it.
+          # We use `mv` to move the zip out of the container's staging path into the Git workspace.
+          zip -r /home/runner/work/${{ github.repository }}/${{ github.repository }}/backup.zip ${BACKUP_DIR}
  
-      # 🔑 FIX: This step directly pushes the new backup.zip to the 'backup' branch,
-      # eliminating the race condition caused by the Pull Request delay.
+      # 🔑 FIX 2: Removed 'files' input as it is not supported by this action.
       - name: ✅ Atomic Force-Push New Backup to 'backup' Branch
         if: always()
         uses: ad-m/github-push-action@master
         with:
           github_token: ${{ secrets.GH_TOKEN }}
           branch: backup
-          force: true # Necessary to overwrite the existing backup.zip on the branch
-          # Only push the newly created backup.zip file
-          files: backup.zip
+          force: true
+          # The action will commit and push any changes in the workspace,
+          # including the new backup.zip file now located at the workspace root.
