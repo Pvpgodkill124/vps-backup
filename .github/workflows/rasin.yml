@@ -1,4 +1,4 @@
-name: VPS 24/7 (Debian 11 Container)
+name: VPS 24/7
 
 on:
   schedule:
@@ -13,16 +13,14 @@ jobs:
     container: debian:bullseye-slim
 
     steps:
-      # NOTE: This runs on the host (ubuntu-latest) and sets up the git workspace
       - name: ⬇️ Checkout Repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_TOKEN }}
 
-      # 🔑 FIX 1: Install 'sudo' package inside the minimal container
       - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory (Inside Debian 11)
         run: |
-          # Install 'sudo' here to resolve "sudo: not found" error when accessing host-level resources
+          # Install 'sudo' to allow interaction with host-level services like systemctl
           apt update -y
           apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo
 
@@ -33,11 +31,10 @@ jobs:
           BACKUP_DIR="/opt/vps-backup"
           BACKUP_DATA_DIR="${BACKUP_DIR}/data"
           
-          # Create the primary staging directory (no sudo needed as root)
+          # Create the primary staging directory
           mkdir -p "${BACKUP_DATA_DIR}"
  
       - name: 📦 Retrieve Previous Backup from 'backup' Branch
-        # Use a separate job step to explicitly fetch the backup branch files
         run: |
           echo "::group::Retrieving backup from Git branch"
           BACKUP_REPO_DIR=./backup/repo
@@ -45,6 +42,7 @@ jobs:
           # Clone backup branch
           git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
           git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
+          
           if [ -f ${BACKUP_REPO_DIR}/backup.zip ];
           then
             mkdir -p ./backup
@@ -70,7 +68,7 @@ jobs:
             
             # --- START RESTORATION OF PERSISTENT FOLDERS ---
             
-            # Restore /root home (no sudo needed)
+            # Restore /root home
             if [ -d ${BACKUP_DATA_DIR}/root_home ];
             then
                 echo "Restoring /root contents..."
@@ -94,16 +92,16 @@ jobs:
             # Restore Pterodactyl Wings data (/var/lib/pterodactyl)
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_wings ]; then
                 mkdir -p /var/lib/pterodactyl
-                cp -a ${BACKUP_DATA_DIR}/pterodactyl_wings/. /var/lib/pterodactyl/
+                cp -a /var/lib/pterodactyl/. /var/lib/pterodactyl/
             fi
             
-            # Restore Nginx Configuration - requires 'sudo' to interact with the runner's system files
+            # Restore Nginx Configuration
             if [ -d ${BACKUP_DATA_DIR}/etc_nginx ]; then
                 echo "Restoring Nginx configuration..."
                 sudo cp -a ${BACKUP_DATA_DIR}/etc_nginx/. /etc/nginx/
             fi
             
-            # Restore Custom Systemd Service Files - requires 'sudo' to interact with the runner's system files
+            # Restore Custom Systemd Service Files
             if [ -d ${BACKUP_DATA_DIR}/etc_systemd ]; then
                 echo "Restoring systemd service files..."
                 sudo cp -a ${BACKUP_DATA_DIR}/etc_systemd/. /etc/systemd/system/
@@ -116,7 +114,7 @@ jobs:
             echo "No backup found, starting fresh."
           fi
           
-          # Restore Tailscale state (separate due to /var/lib requirements)
+          # Restore Tailscale state
           if [ -f ${BACKUP_DATA_DIR}/tailscaled.state ];
           then
             mkdir -p /var/lib/tailscale
@@ -125,11 +123,8 @@ jobs:
             echo "Tailscale state restored."
           fi
  
-      # --- Networking and Service Installation Steps ---
-      
       - name: 🌐 Install Networking Tools (Tailscale, Cloudflared, Playit)
         run: |
-          # Note: Tailscale install script handles Debian correctly
           curl -fsSL https://tailscale.com/install.sh | sh
           
           # Install Cloudflared
@@ -139,38 +134,55 @@ jobs:
           
       - name: 🔑 Configure Root User and SSH Access
         run: |
-          # Use 'sh' to ensure compatibility across Debian/Ubuntu runtimes
           sh -c "$(curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root)"
           
           echo "root:root" | chpasswd
           echo "root ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/root
           
-          # Need sudo for runner's system files outside the container's virtual root
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo systemctl restart ssh || echo "SSH restart failed, continuing."
 
       - name: 🚀 Start Networking Services & Database
         run: |
-          # Start Database (Use sudo as systemctl is a host-level service)
+          # Start Database
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
           
-          # Restore Pterodactyl Database (runs inside container)
+          # Restore Pterodactyl Database
           if [ -f /opt/vps-backup/data/pterodactyl_db.sql ];
           then
               echo "Re-importing Pterodactyl database..."
               mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
-          # Start Tailscale
-          tailscaled &
-          sleep 8
-          tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || echo "Tailscale already up/error"
+          # 🔑 FIX: Start Tailscale Daemon robustly and wait for socket
+          TS_SOCK="/var/run/tailscale/tailscaled.sock"
+          echo "Starting Tailscale daemon..."
+          # Start daemon using nohup to detach it and keep it running in the background
+          nohup tailscaled > /dev/null 2>&1 &
           
+          # Wait loop for the daemon socket to appear (Max 30 seconds)
+          echo "Waiting for Tailscale daemon socket to appear at $TS_SOCK..."
+          for i in $(seq 1 30); do
+              if [ -S "$TS_SOCK" ]; then
+                  echo "Tailscale daemon is running. Proceeding."
+                  break
+              fi
+              echo "Attempt $i/30: Socket not found. Sleeping 1 second..."
+              sleep 1
+              if [ "$i" -eq 30 ]; then
+                  echo "FATAL: Tailscale daemon failed to start within 30 seconds."
+                  exit 1
+              fi
+          done
+          
+          # Bring the Tailscale interface up
+          tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || echo "Tailscale UP failed, continuing."
+
           # Start Cloudflare Tunnel
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
           /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
-           
+
           
           # Start Tailscale Funnel
           echo "Starting Tailscale Funnel on port 80..."
@@ -188,6 +200,7 @@ jobs:
           echo "------------------------------------------"
           echo "📍 Tailscale MagicDNS Name: root"
           echo "💻 Tailscale IP (Internal VPN):"
+          # This command should now succeed as the daemon is confirmed running
           tailscale ip -4 || echo "Tailscale IP not found"
           echo "=========================================="
  
@@ -203,14 +216,11 @@ jobs:
           
           # --- DUMP DATABASE ---
           echo "Attempting to dump Pterodactyl database..."
-          # No change here, systemctl still needs sudo/host context
           sudo systemctl start mariadb 2>/dev/null || true
           mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED. Continuing."
           
           # --- START COPYING AND BACKUP UP ---
-          # All 'cp' commands no longer need 'sudo' as we are root inside the container,
-          # but the host-level copies need it (Nginx/Systemd)
-
+          
           # 1. /root/ contents
           echo "Copying /root directory contents..."
           mkdir -p ${BACKUP_DATA_DIR}/root_home
@@ -244,25 +254,22 @@ jobs:
           echo "Copying Tailscale state..."
           cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/
 
-          # 6. Nginx/Systemd configs (Requires sudo to copy from runner's system paths)
-          # These paths are on the host OS, so 'sudo' is required.
+          # 6. Nginx/Systemd configs 
           sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd
           if [ -d /etc/nginx ]; then sudo cp -a /etc/nginx/. ${BACKUP_DATA_DIR}/etc_nginx/; fi
           if [ -d /etc/systemd/system ]; then sudo cp -a /etc/systemd/system/. ${BACKUP_DATA_DIR}/etc_systemd/; fi
 
           # --- CLEANUP AND ZIP ---
           
-          # Cleanup cache/temporary files before zipping (no sudo needed)
+          # Cleanup cache/temporary files before zipping
           rm -rf ${BACKUP_DATA_DIR}/root_home/.cache ${BACKUP_DATA_DIR}/root_home/.tmate.sock ${BACKUP_DATA_DIR}/root_home/.bash_history
           
-          # Set ownership back to runner user for the host to handle the file (no sudo needed, as we are root)
+          # Set ownership for the host to handle the file
           chown -R $USER:$USER ${BACKUP_DIR}
           
-          # 🔑 FIX 2: Create the final zip archive *directly in the $GITHUB_WORKSPACE* # which is the current working directory, for the push action to find it.
-          # We use `mv` to move the zip out of the container's staging path into the Git workspace.
+          # Create the final zip archive directly in the $GITHUB_WORKSPACE root
           zip -r /home/runner/work/${{ github.repository }}/${{ github.repository }}/backup.zip ${BACKUP_DIR}
  
-      # 🔑 FIX 2: Removed 'files' input as it is not supported by this action.
       - name: ✅ Atomic Force-Push New Backup to 'backup' Branch
         if: always()
         uses: ad-m/github-push-action@master
@@ -270,5 +277,3 @@ jobs:
           github_token: ${{ secrets.GH_TOKEN }}
           branch: backup
           force: true
-          # The action will commit and push any changes in the workspace,
-          # including the new backup.zip file now located at the workspace root.
