@@ -204,7 +204,7 @@ jobs:
           echo "=========================================="
  
       - name: Sleep to Keep VPS Alive (6 Hours)
-        run: sleep 21600
+        run: sleep 21000
  
       # --- CANCELLATION-SAFE BACKUP STEPS ---
       - name: 💾 Create Backup Archive (FULL CONFIGURATION PERSISTENCE)
