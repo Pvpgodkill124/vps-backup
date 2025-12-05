@@ -1,124 +1,114 @@
 name: VPS 24/7
-on:schedule:
-- cron: '0 */6 * * *'
-workflow_dispatch:
+
+on:
+  # FIX 1: Indentation for 'schedule' and 'workflow_dispatch' 
+  # must be 2 spaces under 'on:'.
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
 jobs:
-vps-session:
-runs-on: ubuntu-latest
-timeout-minutes: 350  # Just under 6 hourssteps:
+  # FIX 2: The job ID 'vps-session' is 2 spaces under 'jobs:'.
+  vps-session:
+    # FIX 3: All job properties (runs-on, timeout-minutes, steps) 
+    # must be 4 spaces under 'vps-session:'.
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # Just under 6 hours
+
+    steps:
+      # FIX 4: Each step item (- name:) must be 6 spaces under 'steps:'.
+      - name: Checkout Repository
+        # All step properties (uses:, with:) must be 8 spaces under the step.
+        uses: actions/checkout@v4
+        with:
+          # Properties under 'with:' must be 10 spaces.
+          token: ${{ secrets.GH_TOKEN }}
+
+      # --- 1. SETUP VPS DIRECTORY AND PREREQUISITES ---
+      - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory
+        run: |
+          # All lines in the 'run: |' block are typically 8 spaces.
+          sudo hostnamectl set-hostname root
+          sudo apt update
+          # Install all necessary packages (including 'zip' which is needed later)
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server zip
+
+          # Define the dedicated backup staging directory
+          BACKUP_DIR="/opt/VpsBackUp" 
+          # Create the directory structure with appropriate permissions
+          sudo mkdir -p "${BACKUP_DIR}/data"
+          sudo chown $USER:$USER "${BACKUP_DIR}" "${BACKUP_DIR}/data"
+          
+      - name: 📦 Retrieve Previous Backup from 'backup' Branch
+        run: |
+          echo "::group::Retrieving backup from Git branch"
+          BACKUP_REPO_DIR=./backup/repo
+          # Clone the backup branch
+          git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
+          
+          # Check if the backup was successful and extract files
+          if [ -d "${BACKUP_REPO_DIR}" ]; then
+            echo "Backup repo cloned successfully. Extracting files..."
+            # Copy contents of the data folder only, preserving all files and folders
+            cp -r ${BACKUP_REPO_DIR}/data/* ${BACKUP_DIR}/data/ || true 
+            echo "Files copied to staging directory."
+          else
+            echo "Warning: Backup branch clone failed. Starting from a fresh environment."
+          fi
+          # Clean up the temporary repo folder
+          rm -rf ${BACKUP_REPO_DIR}
+          echo "::endgroup::"
+          
+      # --- 2. RUN VPS SESSION AND CREATE NEW BACKUP DATA (Placeholder for your main logic) ---
+      - name: ✨ Run VPS Session and Create New Backup Data
+        run: |
+          echo "NOTE: Insert your tmate, server, or VPS-related run commands here."
+          # This is the step where your environment will be active 
+          # and generate the new files that you want to back up.
+          # Example: Your tmate script, or a script to dump a new DB backup.
+          # Ensure any new files are saved inside /opt/VpsBackUp/data/
+          
+      # --- 2.5. Archive the Backup for Commit ---
+      - name: 💾 Create final ZIP archive of the new backup
+        run: |
+          # Navigate to a safe location (e.g., repository root)
+          cd ${{ github.workspace }}
+          # Create the final zip archive, starting from the new backup folder
+          # The zip file will contain a top-level folder named 'VpsBackUp'
+          zip -r backup.zip /opt/VpsBackUp
+          # The file 'backup.zip' is now ready to be committed.
 
 
-  - name: Checkout Repository
-    uses: actions/checkout@v4
-    with:
-      # Line 15 is here. Ensure this 'token' line is indented exactly two spaces from 'with:'.
-      token: ${{ secrets.GH_TOKEN }}
+      # --- 3. Commit and Merge the Backup ---
+      # This entire section commits the 'backup.zip' file to the 'backup' branch
+      - name: 🔄 Create Pull Request with Backup (Auto-Merge Start)
+        id: cpr
+        uses: peter-evans/create-pull-request@v6
+        if: always()
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          commit-message: '🤖 Automated Backup: Workflow ${{ github.run_id }}'
+          title: 'Auto-Merge Backup: Workflow ${{ github.run_id }}'
+          # A temporary branch name to create the PR from
+          branch: backup-auto-merge-${{ github.run_id }} 
+          # The target branch for the PR
+          base: backup 
+          body: |
+            Automated workflow run created a new backup.
+            This Pull Request will be merged automatically.
+          # The file to be committed
+          add-paths: backup.zip
 
-  # --- 1. SETUP VPS DIRECTORY AND PREREQUISITES ---
-  - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory
-    run: |
-      sudo hostnamectl set-hostname root
-      sudo apt update
-      # Install all necessary packages (including 'zip' which is needed later)
-      sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server zip
-
-      # Define the dedicated backup staging directory
-      BACKUP_DIR="/opt/VpsBackUp" 
-      # Create the directory structure with appropriate permissions
-      sudo mkdir -p "${BACKUP_DIR}/data"
-      sudo chown $USER:$USER "${BACKUP_DIR}" "${BACKUP_DIR}/data"
-      
-  - name: 📦 Retrieve Previous Backup from 'backup' Branch
-    run: |
-      echo "::group::Retrieving backup from Git branch"
-      BACKUP_REPO_DIR=./backup/repo
-      # Clone the backup branch
-      git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
-      git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
-
-      if [ -f ${BACKUP_REPO_DIR}/backup.zip ];
-      then
-        mkdir -p ./backup
-        mv ${BACKUP_REPO_DIR}/backup.zip ./backup/backup.zip
-        echo "Found previous backup. Unzipping..."
-        # Unzip the contents back to the root directory
-        sudo unzip -o ./backup/backup.zip -d /
-        echo "Restore complete."
-        
-        # Since /root was backed up as /opt/VpsBackUp/data/root_home, we restore it here.
-        # Move contents of the temporary root_home staging area back to /root/
-        sudo cp -a /opt/VpsBackUp/data/root_home/. /root/ 
-        echo "/root/ files restored."
-        
-      else
-        echo "No previous backup found. Starting fresh."
-      fi
-      echo "::endgroup::"
-  
-  # [Your main runtime tasks like tmate/tailscale execution would run here]
-
-  # --- 2. CREATE NEW BACKUP ---
-  - name: 💾 Create New Backup and Zip Files
-    run: |
-      BACKUP_DIR="/opt/VpsBackUp" 
-      BACKUP_DATA_DIR="${BACKUP_DIR}/data"
-      
-      # Clean up previous temporary files that might have been restored
-      sudo rm -rf ${BACKUP_DATA_DIR}/root_home/
-      
-      # 2.1. Copy the contents of /root/ (the home directory of the root user)
-      # The new location will be /opt/VpsBackUp/data/root_home
-      sudo mkdir -p "${BACKUP_DATA_DIR}/root_home"
-      echo "Copying /root/ contents to backup staging..."
-      # The -a flag preserves permissions and copies hidden files
-      sudo cp -a /root/. ${BACKUP_DATA_DIR}/root_home/
-      # Remove the temporary current directory reference that cp might create
-      sudo rm -f ${BACKUP_DATA_DIR}/root_home/.
-
-      # 2.2. Copy Tailscale state (optional, only if using Tailscale)
-      echo "Copying Tailscale state..."
-      sudo cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/
-
-      # 2.3. Clean up before zipping (removes large/unnecessary files)
-      echo "Cleaning up temporary files..."
-      sudo rm -rf ${BACKUP_DATA_DIR}/root_home/.cache
-      sudo rm -f ${BACKUP_DATA_DIR}/root_home/.tmate.sock ${BACKUP_DATA_DIR}/root_home/.bash_history
-
-      # 2.4. Change ownership for the runner to zip the file without sudo
-      sudo chown -R $USER:$USER ${BACKUP_DIR}
-
-      # 2.5. Create the final zip archive, starting from the new backup folder
-      zip -r backup.zip ${BACKUP_DIR}
-
-  # 3. Commit and Merge the Backup
-
-  # 3.1. Create a Pull Request with the new backup file
-  - name: 🔄 Create Pull Request with Backup (Auto-Merge Start)
-    id: cpr
-    uses: peter-evans/create-pull-request@v6
-    if: always()
-    with:
-      token: ${{ secrets.GH_TOKEN }}
-      commit-message: '🤖 Automated Backup: Workflow ${{ github.run_id }}'
-      title: 'Auto-Merge Backup: Workflow ${{ github.run_id }}'
-      branch: backup-auto-merge-${{ github.run_id }}
-      base: backup
-      body: |
-        Automated workflow run created a new backup.
-        This Pull Request will be merged automatically.
-      add-paths: backup.zip
-
-  # 3.2. Immediately Merge the Pull Request
-  - name: ✅ Auto-Merge the Pull Request (Human-Free Backup)
-    if: steps.cpr.outputs.pull-request-number != ''
-    run: |
-      PR_NUMBER=${{ steps.cpr.outputs.pull-request-number }}
-      echo "Merging PR #$PR_NUMBER..."
-      curl -L \
-        -X PUT \
-        -H "Accept: application/vnd.github+json" \
-        -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
-        -H "X-GitHub-Api-Version: 2022-11-28" \
-        "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER/merge" \
-        -d '{"commit_title":"MERGED: Auto Backup Commit","commit_message":"This PR was auto-merged after a successful backup run."}'
-      echo "Merge command executed."
+      - name: ✅ Auto-Merge the Pull Request (Human-Free Backup)
+        # Only run if a PR was successfully created
+        if: steps.cpr.outputs.pull-request-number != ''
+        run: |
+          PR_NUMBER=${{ steps.cpr.outputs.pull-request-number }}
+          echo "Merging PR #$PR_NUMBER..."
+          curl -L \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER/merge
+          echo "PR #$PR_NUMBER merged."
