@@ -1,44 +1,51 @@
-name: VPS 24/7
+name: VPS 24/7 (Debian 11 Container)
 
 on:
-  # FIX: Correct indentation for 'schedule'
   schedule:
     - cron: '0 */6 * * *'  # Runs every 6 hours
   workflow_dispatch:
 
 jobs:
-  # FIX: Correct indentation for 'vps-session'
   vps-session:
+    # Use the standard GitHub runner (Ubuntu) to host the container
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # Just under 6 hours
+    timeout-minutes: 350
+
+    # Using Debian 11 (Bullseye) slim container as requested
+    container: debian:bullseye-slim
 
     steps:
       - name: ⬇️ Checkout Repository
+        # Crucial for the push step later: We must clone the main branch initially.
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory
+      - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory (Inside Debian 11)
         run: |
+          # The runner user is typically root inside the container
+          apt update -y
+          # Install core tools (zip, git, tmate, mariadb client/server)
+          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip
+
+          # Configure hostname
+          hostnamectl set-hostname root || true
+          
           # Define standard staging directory
           BACKUP_DIR="/opt/vps-backup"
           BACKUP_DATA_DIR="${BACKUP_DIR}/data"
           
-          sudo hostnamectl set-hostname root
-          sudo apt update
-          # Ensure 'zip' is installed for archiving
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server zip
-
-          # Create the primary staging directory
-          sudo mkdir -p "${BACKUP_DATA_DIR}"
-          # Ensure the runner user owns the directory for zip/unzip operations later
-          sudo chown -R $USER:$USER "${BACKUP_DIR}"
+          # Create the primary staging directory (no sudo needed as root)
+          mkdir -p "${BACKUP_DATA_DIR}"
  
       - name: 📦 Retrieve Previous Backup from 'backup' Branch
+        # This step is the key area for the race condition. It must clone the LATEST backup.
         run: |
           echo "::group::Retrieving backup from Git branch"
           BACKUP_REPO_DIR=./backup/repo
-          # Clones backup branch using two methods for robustness
+          
+          # Use a clean clone directly into a local temp directory
+          # The 'backup' branch is the source of truth for the latest data.
           git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
           git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
           
@@ -61,53 +68,50 @@ jobs:
           
           if [ -f ./backup/backup.zip ];
           then
-            # Unzip restores files to the directory structure they were zipped from,
-            # which is /opt/vps-backup/
-            sudo unzip -o ./backup/backup.zip -d /
+            # Unzip restores files to the directory structure they were zipped from
+            unzip -o ./backup/backup.zip -d /
             echo "Session files restored to /opt/vps-backup/."
             
             # --- START RESTORATION OF PERSISTENT FOLDERS ---
             
-            # Restore /root home
+            # Restore /root home (no sudo needed)
             if [ -d ${BACKUP_DATA_DIR}/root_home ];
             then
                 echo "Restoring /root contents..."
-                sudo cp -a ${BACKUP_DATA_DIR}/root_home/. /root/
+                cp -a ${BACKUP_DATA_DIR}/root_home/. /root/
             fi
             
-            # NEW: Restore /incase folder
+            # Restore /incase folder
             if [ -d ${BACKUP_DATA_DIR}/incase ];
             then
                 echo "Restoring /incase contents..."
-                sudo mkdir -p /incase # Ensure destination exists
-                sudo cp -a ${BACKUP_DATA_DIR}/incase/. /incase/
+                mkdir -p /incase
+                cp -a ${BACKUP_DATA_DIR}/incase/. /incase/
             fi
             
             # Restore Pterodactyl Panel files (/var/www/pterodactyl)
-            if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ];
-            then
-                sudo mkdir -p /var/www/pterodactyl
-                sudo cp -a ${BACKUP_DATA_DIR}/pterodactyl_panel/. /var/www/pterodactyl/
+            if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ]; then
+                mkdir -p /var/www/pterodactyl
+                cp -a ${BACKUP_DATA_DIR}/pterodactyl_panel/. /var/www/pterodactyl/
             fi
             
             # Restore Pterodactyl Wings data (/var/lib/pterodactyl)
-            if [ -d ${BACKUP_DATA_DIR}/pterodactyl_wings ];
-            then
-                sudo mkdir -p /var/lib/pterodactyl
-                sudo cp -a ${BACKUP_DATA_DIR}/pterodactyl_wings/. /var/lib/pterodactyl/
+            if [ -d ${BACKUP_DATA_DIR}/pterodactyl_wings ]; then
+                mkdir -p /var/lib/pterodactyl
+                cp -a ${BACKUP_DATA_DIR}/pterodactyl_wings/. /var/lib/pterodactyl/
             fi
             
-            # Restore Nginx Configuration
+            # Restore Nginx Configuration - requires 'sudo' to interact with the runner's system files
             if [ -d ${BACKUP_DATA_DIR}/etc_nginx ]; then
                 echo "Restoring Nginx configuration..."
                 sudo cp -a ${BACKUP_DATA_DIR}/etc_nginx/. /etc/nginx/
             fi
             
-            # Restore Custom Systemd Service Files
+            # Restore Custom Systemd Service Files - requires 'sudo' to interact with the runner's system files
             if [ -d ${BACKUP_DATA_DIR}/etc_systemd ]; then
                 echo "Restoring systemd service files..."
                 sudo cp -a ${BACKUP_DATA_DIR}/etc_systemd/. /etc/systemd/system/
-                sudo systemctl daemon-reload # Reload daemon
+                sudo systemctl daemon-reload
             fi
             
             # --- END RESTORATION OF PERSISTENT FOLDERS ---
@@ -119,9 +123,9 @@ jobs:
           # Restore Tailscale state (separate due to /var/lib requirements)
           if [ -f ${BACKUP_DATA_DIR}/tailscaled.state ];
           then
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp ${BACKUP_DATA_DIR}/tailscaled.state /var/lib/tailscale/tailscaled.state
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            mkdir -p /var/lib/tailscale
+            cp ${BACKUP_DATA_DIR}/tailscaled.state /var/lib/tailscale/tailscaled.state
+            chmod 600 /var/lib/tailscale/tailscaled.state
             echo "Tailscale state restored."
           fi
  
@@ -129,60 +133,60 @@ jobs:
       
       - name: 🌐 Install Networking Tools (Tailscale, Cloudflared, Playit)
         run: |
-          # Install Tailscale
+          # Note: Tailscale install script handles Debian correctly
           curl -fsSL https://tailscale.com/install.sh | sh
           
           # Install Cloudflared
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-          sudo install cloudflared /usr/local/bin/cloudflared
+          install cloudflared /usr/local/bin/cloudflared
           
-          # Install Playit.gg Agent
+          # Install Playit.gg Agent (PPA method works on Debian/Ubuntu derivatives)
           echo "Setting up Playit.gg PPA..."
-          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null
-          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit-cloud.list
-          sudo apt update
-          sudo apt install -y playit
+          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null
+          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | tee /etc/apt/sources.list.d/playit-cloud.list
+          apt update -y
+          apt install -y playit
           
       - name: 🔑 Configure Root User and SSH Access
         run: |
-          # This script handles root user setup
-          curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root -o /tmp/root_setup.sh
-          chmod +x /tmp/root_setup.sh
-          sudo /tmp/root_setup.sh
-          echo "root:root" | sudo chpasswd
-          echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/root
+          # Use 'sh' to ensure compatibility across Debian/Ubuntu runtimes
+          sh -c "$(curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root)"
+          
+          echo "root:root" | chpasswd
+          echo "root ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/root
+          
+          # Need sudo for runner's system files outside the container's virtual root
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo systemctl restart ssh || echo "SSH restart failed, continuing."
 
       - name: 🚀 Start Networking Services & Database
         run: |
-          # Start Database
+          # Start Database (Use sudo as systemctl is a host-level service)
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
           
-          # Restore Pterodactyl Database
+          # Restore Pterodactyl Database (runs inside container)
           if [ -f /opt/vps-backup/data/pterodactyl_db.sql ];
           then
               echo "Re-importing Pterodactyl database..."
-              # Note: Ensure the 'panel' database exists before running this.
-              sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
+              mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
           # Start Tailscale
-          sudo tailscaled &
+          tailscaled &
           sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || echo "Tailscale already up/error"
+          tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || echo "Tailscale already up/error"
           
           # Start Cloudflare Tunnel
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
-          sudo /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
+          /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
           
           # Start Playit.gg
           playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & 
           
           # Start Tailscale Funnel
           echo "Starting Tailscale Funnel on port 80..."
-          sudo tailscale funnel 8080 on & # Replace '8080' with your actual internal service port.
+          tailscale funnel 8080 on &
 
           sleep 5
 
@@ -212,44 +216,45 @@ jobs:
           # --- DUMP DATABASE ---
           echo "Attempting to dump Pterodactyl database..."
           sudo systemctl start mariadb 2>/dev/null || true
-          sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED. Continuing."
+          # Note: mysqldump runs inside the Debian container
+          mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED. Continuing."
           
           # --- START COPYING AND BACKUP UP ---
           
           # 1. /root/ contents
           echo "Copying /root directory contents..."
-          sudo mkdir -p ${BACKUP_DATA_DIR}/root_home
-          sudo cp -a /root/. ${BACKUP_DATA_DIR}/root_home/
+          mkdir -p ${BACKUP_DATA_DIR}/root_home
+          cp -a /root/. ${BACKUP_DATA_DIR}/root_home/
 
-          # 2. /incase/ folder (New requirement)
+          # 2. /incase/ folder 
           echo "Copying /incase directory contents..."
-          sudo mkdir -p ${BACKUP_DATA_DIR}/incase
+          mkdir -p ${BACKUP_DATA_DIR}/incase
           if [ -d /incase ];
           then
-            sudo cp -a /incase/. ${BACKUP_DATA_DIR}/incase/
+            cp -a /incase/. ${BACKUP_DATA_DIR}/incase/
           else
             echo "/incase directory does not exist yet. Skipping."
           fi
           
           # 3. Pterodactyl Panel files
           echo "Copying Pterodactyl Panel files (if present)..."
-          sudo mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_panel
+          mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_panel
           if [ -d /var/www/pterodactyl ]; then
-            sudo cp -a /var/www/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_panel/
+            cp -a /var/www/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_panel/
           fi
           
           # 4. Pterodactyl Wings/Server data
           echo "Copying Pterodactyl Wings/Server data (if present)..."
-          sudo mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_wings
+          mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_wings
           if [ -d /var/lib/pterodactyl ]; then
-            sudo cp -a /var/lib/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_wings/
+            cp -a /var/lib/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_wings/
           fi
           
           # 5. Tailscale state
           echo "Copying Tailscale state..."
-          sudo cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/
+          cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/
 
-          # 6. Nginx/Systemd configs (Existing logic)
+          # 6. Nginx/Systemd configs (Requires sudo to copy from runner's system paths)
           sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd
           if [ -d /etc/nginx ]; then sudo cp -a /etc/nginx/. ${BACKUP_DATA_DIR}/etc_nginx/; fi
           if [ -d /etc/systemd/system ]; then sudo cp -a /etc/systemd/system/. ${BACKUP_DATA_DIR}/etc_systemd/; fi
@@ -257,38 +262,22 @@ jobs:
           # --- CLEANUP AND ZIP ---
           
           # Cleanup cache/temporary files before zipping
-          sudo rm -rf ${BACKUP_DATA_DIR}/root_home/.cache ${BACKUP_DATA_DIR}/root_home/.tmate.sock ${BACKUP_DATA_DIR}/root_home/.bash_history
+          rm -rf ${BACKUP_DATA_DIR}/root_home/.cache ${BACKUP_DATA_DIR}/root_home/.tmate.sock ${BACKUP_DATA_DIR}/root_home/.bash_history
           
-          # Set ownership so the non-sudo runner user can zip the file
+          # Set ownership back to runner user (not container root) for zip utility if needed
           sudo chown -R $USER:$USER ${BACKUP_DIR}
           
           # Create the final zip archive of the entire staging directory
           zip -r backup.zip ${BACKUP_DIR}
  
-      # 1. Create a Pull Request with the new backup file
-      - name: 🔄 Create Pull Request with Backup (Auto-Merge Start)
-        id: cpr
-        uses: peter-evans/create-pull-request@v6
+      # 🔑 FIX: This step directly pushes the new backup.zip to the 'backup' branch,
+      # eliminating the race condition caused by the Pull Request delay.
+      - name: ✅ Atomic Force-Push New Backup to 'backup' Branch
         if: always()
+        uses: ad-m/github-push-action@master
         with:
-          token: ${{ secrets.GH_TOKEN }} 
-          commit-message: '🤖 Automated Backup: Workflow ${{ github.run_id }}'
-          title: 'Auto-Merge Backup: Workflow ${{ github.run_id }}'
-          branch: backup-auto-merge-${{ github.run_id }} 
-          base: backup 
-          body: |
-            Automated workflow run created a new backup.
-            This Pull Request will be merged automatically.
-          add-paths: backup.zip 
-
-      # 2. Immediately Merge the Pull Request
-      - name: ✅ Auto-Merge the Pull Request (Human-Free Backup)
-        if: steps.cpr.outputs.pull-request-number != ''
-        run: |
-          PR_NUMBER=${{ steps.cpr.outputs.pull-request-number }}
-          echo "Attempting to merge PR #${PR_NUMBER}..."
-          
-          # Using the 'gh' CLI for a clean, reliable merge command
-          gh pr merge "$PR_NUMBER" --squash --delete-branch --admin
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          github_token: ${{ secrets.GH_TOKEN }}
+          branch: backup
+          force: true # Necessary to overwrite the existing backup.zip on the branch
+          # Only push the newly created backup.zip file
+          files: backup.zip
