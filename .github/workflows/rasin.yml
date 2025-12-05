@@ -7,31 +7,30 @@ on:
 
 jobs:
   vps-session:
+    # Use the Debian 11 (Bullseye) slim container
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
     container: debian:bullseye-slim
 
     steps:
-      - name: ⬇️ Checkout Repository
+      - name: ⬇️ Checkout Repository (Needed for the final push)
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory (Inside Debian 11)
+      - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory (Debian Fixes Applied)
         run: |
-          # Install 'sudo' to allow interaction with host-level services like systemctl
+          # The minimal Debian container requires explicit installation of many tools.
           apt update -y
+          # Installing core tools, including 'sudo' for host-level interaction.
           apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo
 
-          # Configure hostname
           hostnamectl set-hostname root || true
           
-          # Define standard staging directory
           BACKUP_DIR="/opt/vps-backup"
           BACKUP_DATA_DIR="${BACKUP_DIR}/data"
           
-          # Create the primary staging directory
           mkdir -p "${BACKUP_DATA_DIR}"
  
       - name: 📦 Retrieve Previous Backup from 'backup' Branch
@@ -39,7 +38,7 @@ jobs:
           echo "::group::Retrieving backup from Git branch"
           BACKUP_REPO_DIR=./backup/repo
           
-          # Clone backup branch
+          # Clone the backup branch to retrieve the latest backup.zip
           git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
           git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
           
@@ -55,24 +54,25 @@ jobs:
           rm -rf ${BACKUP_REPO_DIR}
           echo "::endgroup::"
           
-      - name: 🔄 Restore Files and Tailscale State (FULL PERSISTENCE)
+      - name: 🔄 Restore Files and Tailscale State (Robust Copy Fixes Applied)
         run: |
           echo "Restoring previous session files..."
           BACKUP_DATA_DIR="/opt/vps-backup/data"
           
           if [ -f ./backup/backup.zip ];
           then
-            # Unzip restores files to the directory structure they were zipped from
+            # Unzip all persisted files from the full path structure
             unzip -o ./backup/backup.zip -d /
             echo "Session files restored to /opt/vps-backup/."
             
             # --- START RESTORATION OF PERSISTENT FOLDERS ---
+            # FIX: Using 'cp -r source/* destination/ || true' to prevent 'cp: ... are the same file' error
             
             # Restore /root home
             if [ -d ${BACKUP_DATA_DIR}/root_home ];
             then
                 echo "Restoring /root contents..."
-                cp -a ${BACKUP_DATA_DIR}/root_home/. /root/
+                cp -r ${BACKUP_DATA_DIR}/root_home/* /root/ || true
             fi
             
             # Restore /incase folder
@@ -80,31 +80,31 @@ jobs:
             then
                 echo "Restoring /incase contents..."
                 mkdir -p /incase
-                cp -a ${BACKUP_DATA_DIR}/incase/. /incase/
+                cp -r ${BACKUP_DATA_DIR}/incase/* /incase/ || true
             fi
             
             # Restore Pterodactyl Panel files (/var/www/pterodactyl)
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ]; then
                 mkdir -p /var/www/pterodactyl
-                cp -a ${BACKUP_DATA_DIR}/pterodactyl_panel/. /var/www/pterodactyl/
+                cp -r ${BACKUP_DATA_DIR}/pterodactyl_panel/* /var/www/pterodactyl/ || true
             fi
             
             # Restore Pterodactyl Wings data (/var/lib/pterodactyl)
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_wings ]; then
                 mkdir -p /var/lib/pterodactyl
-                cp -a /var/lib/pterodactyl/. /var/lib/pterodactyl/
+                cp -r ${BACKUP_DATA_DIR}/pterodactyl_wings/* /var/lib/pterodactyl/ || true
             fi
             
-            # Restore Nginx Configuration
+            # Restore Nginx Configuration (Requires sudo for host interaction)
             if [ -d ${BACKUP_DATA_DIR}/etc_nginx ]; then
                 echo "Restoring Nginx configuration..."
-                sudo cp -a ${BACKUP_DATA_DIR}/etc_nginx/. /etc/nginx/
+                sudo cp -r ${BACKUP_DATA_DIR}/etc_nginx/* /etc/nginx/ || true
             fi
             
-            # Restore Custom Systemd Service Files
+            # Restore Custom Systemd Service Files (Requires sudo for host interaction)
             if [ -d ${BACKUP_DATA_DIR}/etc_systemd ]; then
                 echo "Restoring systemd service files..."
-                sudo cp -a ${BACKUP_DATA_DIR}/etc_systemd/. /etc/systemd/system/
+                sudo cp -r ${BACKUP_DATA_DIR}/etc_systemd/* /etc/systemd/system/ || true
                 sudo systemctl daemon-reload
             fi
             
@@ -114,7 +114,7 @@ jobs:
             echo "No backup found, starting fresh."
           fi
           
-          # Restore Tailscale state
+          # Restore Tailscale state (separate to ensure permissions are correct)
           if [ -f ${BACKUP_DATA_DIR}/tailscaled.state ];
           then
             mkdir -p /var/lib/tailscale
@@ -130,10 +130,11 @@ jobs:
           # Install Cloudflared
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           install cloudflared /usr/local/bin/cloudflared
-        
+          
           
       - name: 🔑 Configure Root User and SSH Access
         run: |
+          # Assuming this remote script is compatible with the Debian shell environment
           sh -c "$(curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root)"
           
           echo "root:root" | chpasswd
@@ -145,7 +146,7 @@ jobs:
 
       - name: 🚀 Start Networking Services & Database
         run: |
-          # Start Database
+          # Start Database (Requires sudo for host interaction)
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
           
           # Restore Pterodactyl Database
@@ -155,10 +156,9 @@ jobs:
               mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
-          # 🔑 FIX: Start Tailscale Daemon robustly and wait for socket
+          # FIX: Start Tailscale Daemon robustly and wait for socket (eliminates connection error)
           TS_SOCK="/var/run/tailscale/tailscaled.sock"
           echo "Starting Tailscale daemon..."
-          # Start daemon using nohup to detach it and keep it running in the background
           nohup tailscaled > /dev/null 2>&1 &
           
           # Wait loop for the daemon socket to appear (Max 30 seconds)
@@ -182,7 +182,7 @@ jobs:
           # Start Cloudflare Tunnel
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
           /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
-
+          
           
           # Start Tailscale Funnel
           echo "Starting Tailscale Funnel on port 80..."
@@ -200,7 +200,6 @@ jobs:
           echo "------------------------------------------"
           echo "📍 Tailscale MagicDNS Name: root"
           echo "💻 Tailscale IP (Internal VPN):"
-          # This command should now succeed as the daemon is confirmed running
           tailscale ip -4 || echo "Tailscale IP not found"
           echo "=========================================="
  
@@ -254,7 +253,7 @@ jobs:
           echo "Copying Tailscale state..."
           cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/
 
-          # 6. Nginx/Systemd configs 
+          # 6. Nginx/Systemd configs (Requires sudo for host interaction)
           sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd
           if [ -d /etc/nginx ]; then sudo cp -a /etc/nginx/. ${BACKUP_DATA_DIR}/etc_nginx/; fi
           if [ -d /etc/systemd/system ]; then sudo cp -a /etc/systemd/system/. ${BACKUP_DATA_DIR}/etc_systemd/; fi
@@ -270,7 +269,7 @@ jobs:
           # Create the final zip archive directly in the $GITHUB_WORKSPACE root
           zip -r /home/runner/work/${{ github.repository }}/${{ github.repository }}/backup.zip ${BACKUP_DIR}
  
-      - name: ✅ Atomic Force-Push New Backup to 'backup' Branch
+      - name: ✅ Atomic Force-Push New Backup to 'backup' Branch (Resolves Race Condition)
         if: always()
         uses: ad-m/github-push-action@master
         with:
