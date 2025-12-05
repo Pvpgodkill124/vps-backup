@@ -1,30 +1,30 @@
 name: VPS 24/7
- 
-on:
-  schedule:
-    - cron: '0 */6 * * *'  # Runs every 6 hours
-  workflow_dispatch:
- 
+on:schedule:
+- cron: '0 */6 * * *'
+workflow_dispatch:
 jobs:
-  vps-session:
-    runs-on: ubuntu-latest
-    timeout-minutes: 350  # Just under 6 hours
+vps-session:
+runs-on: ubuntu-latest
+timeout-minutes: 350  # Just under 6 hourssteps:
 
-steps:
-- name: Checkout Repository
+
+  - name: Checkout Repository
     uses: actions/checkout@v4
     with:
+      # Line 15 is here. Ensure this 'token' line is indented exactly two spaces from 'with:'.
       token: ${{ secrets.GH_TOKEN }}
 
-  # --- 1. SETUP VPS DIRECTORY ---
+  # --- 1. SETUP VPS DIRECTORY AND PREREQUISITES ---
   - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory
     run: |
       sudo hostnamectl set-hostname root
       sudo apt update
+      # Install all necessary packages (including 'zip' which is needed later)
       sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server zip
 
       # Define the dedicated backup staging directory
       BACKUP_DIR="/opt/VpsBackUp" 
+      # Create the directory structure with appropriate permissions
       sudo mkdir -p "${BACKUP_DIR}/data"
       sudo chown $USER:$USER "${BACKUP_DIR}" "${BACKUP_DIR}/data"
       
@@ -32,7 +32,7 @@ steps:
     run: |
       echo "::group::Retrieving backup from Git branch"
       BACKUP_REPO_DIR=./backup/repo
-      # Clones backup branch using two methods for robustness
+      # Clone the backup branch
       git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
       git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
 
@@ -41,33 +41,41 @@ steps:
         mkdir -p ./backup
         mv ${BACKUP_REPO_DIR}/backup.zip ./backup/backup.zip
         echo "Found previous backup. Unzipping..."
-        unzip -o ./backup/backup.zip -d /
+        # Unzip the contents back to the root directory
+        sudo unzip -o ./backup/backup.zip -d /
         echo "Restore complete."
+        
+        # Since /root was backed up as /opt/VpsBackUp/data/root_home, we restore it here.
+        # Move contents of the temporary root_home staging area back to /root/
+        sudo cp -a /opt/VpsBackUp/data/root_home/. /root/ 
+        echo "/root/ files restored."
+        
       else
         echo "No previous backup found. Starting fresh."
       fi
       echo "::endgroup::"
   
-  # [Intermediate steps for running the VPS session, e.g., OpenVPN, etc., go here]
-  # Assuming your current tmate/tailscale setup runs here and generates files.
+  # [Your main runtime tasks like tmate/tailscale execution would run here]
 
   # --- 2. CREATE NEW BACKUP ---
   - name: 💾 Create New Backup and Zip Files
     run: |
       BACKUP_DIR="/opt/VpsBackUp" 
       BACKUP_DATA_DIR="${BACKUP_DIR}/data"
-
+      
+      # Clean up previous temporary files that might have been restored
+      sudo rm -rf ${BACKUP_DATA_DIR}/root_home/
+      
       # 2.1. Copy the contents of /root/ (the home directory of the root user)
-      # We use a temporary staging area for the root home to avoid permission issues
+      # The new location will be /opt/VpsBackUp/data/root_home
       sudo mkdir -p "${BACKUP_DATA_DIR}/root_home"
       echo "Copying /root/ contents to backup staging..."
-      # The -a flag preserves permissions, timestamps, etc.
-      # The .* includes hidden files, the * includes non-hidden files.
+      # The -a flag preserves permissions and copies hidden files
       sudo cp -a /root/. ${BACKUP_DATA_DIR}/root_home/
       # Remove the temporary current directory reference that cp might create
       sudo rm -f ${BACKUP_DATA_DIR}/root_home/.
 
-      # 2.2. Copy Tailscale state (if you are using Tailscale for the VPN)
+      # 2.2. Copy Tailscale state (optional, only if using Tailscale)
       echo "Copying Tailscale state..."
       sudo cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/
 
@@ -79,11 +87,12 @@ steps:
       # 2.4. Change ownership for the runner to zip the file without sudo
       sudo chown -R $USER:$USER ${BACKUP_DIR}
 
-      # 2.5. Create the final zip archive, starting from the root directory (/)
-      # We zip the contents of /opt/VpsBackUp
+      # 2.5. Create the final zip archive, starting from the new backup folder
       zip -r backup.zip ${BACKUP_DIR}
 
-  # 1. Create a Pull Request with the new backup file
+  # 3. Commit and Merge the Backup
+
+  # 3.1. Create a Pull Request with the new backup file
   - name: 🔄 Create Pull Request with Backup (Auto-Merge Start)
     id: cpr
     uses: peter-evans/create-pull-request@v6
@@ -99,7 +108,7 @@ steps:
         This Pull Request will be merged automatically.
       add-paths: backup.zip
 
-  # 2. Immediately Merge the Pull Request
+  # 3.2. Immediately Merge the Pull Request
   - name: ✅ Auto-Merge the Pull Request (Human-Free Backup)
     if: steps.cpr.outputs.pull-request-number != ''
     run: |
