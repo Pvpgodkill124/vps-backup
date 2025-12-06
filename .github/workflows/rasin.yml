@@ -2,13 +2,13 @@ name: VPS 24/7
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  
+    - cron: '0 */6 * * *'  # Runs every 6 hours
   workflow_dispatch:
 
 jobs:
   vps-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # Just under 6 hours [cite: 1]
+    timeout-minutes: 350  # Just under 6 hours
 
     steps:
       - name: ⬇️ Checkout Repository
@@ -16,168 +16,167 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }}
 
-  
       - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory
         run: |
           # Define standard staging directory
-          [cite_start]BACKUP_DIR="/opt/vps-backup" [cite: 3]
-          [cite_start]BACKUP_DATA_DIR="${BACKup_DIR}/data" [cite: 3]
+          BACKUP_DIR="/opt/vps-backup"
+          BACKUP_DATA_DIR="${BACKUP_DIR}/data"
           
-          [cite_start]sudo hostnamectl set-hostname root [cite: 3]
-          [cite_start]sudo apt update [cite: 3]
+          sudo hostnamectl set-hostname root
+          sudo apt update
           # Ensure 'zip' is installed for archiving
-          [cite_start]sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server zip [cite: 3]
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server zip
 
           # Create the primary staging directory
-          [cite_start]sudo mkdir -p "${BACKUP_DATA_DIR}" [cite: 4]
+          sudo mkdir -p "${BACKUP_DATA_DIR}"
           # Ensure the runner user owns the directory for zip/unzip operations later
-          [cite_start]sudo chown -R $USER:$USER "${BACKUP_DIR}" [cite: 4]
+          sudo chown -R $USER:$USER "${BACKUP_DIR}"
  
       - name: 📦 Retrieve Previous Backup from 'backup' Branch
         run: |
-          [cite_start]echo "::group::Retrieving backup from Git branch" [cite: 5]
-          [cite_start]BACKUP_REPO_DIR=./backup/repo [cite: 5]
+          echo "::group::Retrieving backup from Git branch"
+          BACKUP_REPO_DIR=./backup/repo
           # Clones backup branch using two methods for robustness
-          [cite_start]git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || [cite: 5, 6] \
-          [cite_start]git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} [cite: 6]
+          git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
+          git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
           
-          [cite_start]if [ -f ${BACKUP_REPO_DIR}/backup.zip ]; [cite: 6]
-          [cite_start]then [cite: 7]
-            [cite_start]mkdir -p ./backup [cite: 7]
-            [cite_start]mv ${BACKUP_REPO_DIR}/backup.zip ./backup/backup.zip [cite: 7]
-            [cite_start]echo "Backup file retrieved successfully." [cite: 7]
-          [cite_start]else [cite: 8]
-            [cite_start]echo "No backup file found on 'backup' branch." [cite: 8]
-          [cite_start]fi [cite: 9]
+          if [ -f ${BACKUP_REPO_DIR}/backup.zip ];
+          then
+            mkdir -p ./backup
+            mv ${BACKUP_REPO_DIR}/backup.zip ./backup/backup.zip
+            echo "Backup file retrieved successfully."
+          else
+            echo "No backup file found on 'backup' branch."
+          fi
           
-          [cite_start]rm -rf ${BACKUP_REPO_DIR} [cite: 9]
-          [cite_start]echo "::endgroup::" [cite: 9]
+          rm -rf ${BACKUP_REPO_DIR}
+          echo "::endgroup::"
           
       - name: 🔄 Restore Files and Tailscale State (FULL PERSISTENCE)
         run: |
-          [cite_start]echo "Restoring previous session files..." [cite: 10]
-          [cite_start]BACKUP_DATA_DIR="/opt/vps-backup/data" [cite: 10]
+          echo "Restoring previous session files..."
+          BACKUP_DATA_DIR="/opt/vps-backup/data"
           
-          [cite_start]if [ -f ./backup/backup.zip ]; [cite: 10]
-          [cite_start]then [cite: 11]
+          if [ -f ./backup/backup.zip ];
+          then
             # Unzip restores files to the directory structure they were zipped from,
             # which is /opt/vps-backup/
-            [cite_start]sudo unzip -o ./backup/backup.zip -d / [cite: 11]
-            [cite_start]echo "Session files restored to /opt/vps-backup/." [cite: 11]
-            # [cite_start]--- START RESTORATION OF PERSISTENT FOLDERS --- [cite: 12]
+            sudo unzip -o ./backup/backup.zip -d /
+            echo "Session files restored to /opt/vps-backup/."
+            # --- START RESTORATION OF PERSISTENT FOLDERS ---
             
             # Restore /root home
-            [cite_start]if [ -d ${BACKUP_DATA_DIR}/root_home ]; [cite: 12, 13]
-            [cite_start]then [cite: 13]
-                [cite_start]echo "Restoring /root contents..." [cite: 13]
-                sudo cp -a ${BACKUP_DATA_DIR}/root_home/. [cite_start]/root/ [cite: 13, 14]
-            [cite_start]fi [cite: 14]
+            if [ -d ${BACKUP_DATA_DIR}/root_home ];
+            then
+                echo "Restoring /root contents..."
+                sudo cp -a ${BACKUP_DATA_DIR}/root_home/. /root/
+            fi
             
             # NEW: Restore /incase folder
-            [cite_start]if [ -d ${BACKUP_DATA_DIR}/incase ]; [cite: 14, 15]
-            [cite_start]then [cite: 15]
-                [cite_start]echo "Restoring /incase contents..." [cite: 15]
-                [cite_start]sudo mkdir -p /incase # Ensure destination exists [cite: 15]
-                sudo cp -a ${BACKUP_DATA_DIR}/incase/. [cite_start]/incase/ [cite: 15, 16]
-            [cite_start]fi [cite: 16]
+            if [ -d ${BACKUP_DATA_DIR}/incase ];
+            then
+                echo "Restoring /incase contents..."
+                sudo mkdir -p /incase # Ensure destination exists
+                sudo cp -a ${BACKUP_DATA_DIR}/incase/. /incase/
+            fi
             
             # Restore Pterodactyl Panel files (/var/www/pterodactyl)
-            [cite_start]if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ]; [cite: 16, 17]
-            [cite_start]then [cite: 17]
-                [cite_start]sudo mkdir -p /var/www/pterodactyl [cite: 17]
-                sudo cp -a ${BACKUP_DATA_DIR}/pterodactyl_panel/. [cite_start]/var/www/pterodactyl/ [cite: 17, 18]
-            [cite_start]fi [cite: 18]
+            if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ];
+            then
+                sudo mkdir -p /var/www/pterodactyl
+                sudo cp -a ${BACKUP_DATA_DIR}/pterodactyl_panel/. /var/www/pterodactyl/
+            fi
             
             # Restore Pterodactyl Wings data (/var/lib/pterodactyl)
-            [cite_start]if [ -d ${BACKUP_DATA_DIR}/pterodactyl_wings ]; [cite: 18, 19]
-            [cite_start]then [cite: 19]
-                [cite_start]sudo mkdir -p /var/lib/pterodactyl [cite: 19]
-                sudo cp -a ${BACKUP_DATA_DIR}/pterodactyl_wings/. [cite_start]/var/lib/pterodactyl/ [cite: 19, 20]
-            [cite_start]fi [cite: 20]
+            if [ -d ${BACKUP_DATA_DIR}/pterodactyl_wings ];
+            then
+                sudo mkdir -p /var/lib/pterodactyl
+                sudo cp -a ${BACKUP_DATA_DIR}/pterodactyl_wings/. /var/lib/pterodactyl/
+            fi
             
             # Restore Nginx Configuration
-            [cite_start]if [ -d ${BACKUP_DATA_DIR}/etc_nginx ]; [cite: 20, 21]
-            [cite_start]then [cite: 21]
-                [cite_start]echo "Restoring Nginx configuration..." [cite: 21]
-                sudo cp -a ${BACKUP_DATA_DIR}/etc_nginx/. [cite_start]/etc/nginx/ [cite: 21, 22]
-            [cite_start]fi [cite: 22]
+            if [ -d ${BACKUP_DATA_DIR}/etc_nginx ];
+            then
+                echo "Restoring Nginx configuration..."
+                sudo cp -a ${BACKUP_DATA_DIR}/etc_nginx/. /etc/nginx/
+            fi
             
             # Restore Custom Systemd Service Files
-            [cite_start]if [ -d ${BACKUP_DATA_DIR}/etc_systemd ]; [cite: 22, 23]
-            [cite_start]then [cite: 23]
-                [cite_start]echo "Restoring systemd service files..." [cite: 23]
-                sudo cp -a ${BACKUP_DATA_DIR}/etc_systemd/. [cite_start]/etc/systemd/system/ [cite: 23, 24]
-                [cite_start]sudo systemctl daemon-reload # Reload daemon [cite: 24]
-            [cite_start]fi [cite: 24]
+            if [ -d ${BACKUP_DATA_DIR}/etc_systemd ];
+            then
+                echo "Restoring systemd service files..."
+                sudo cp -a ${BACKUP_DATA_DIR}/etc_systemd/. /etc/systemd/system/
+                sudo systemctl daemon-reload # Reload daemon
+            fi
             
             # --- END RESTORATION OF PERSISTENT FOLDERS ---
 
-          [cite_start]else [cite: 24]
-            [cite_start]echo "No backup found, starting fresh." [cite: 25]
-          [cite_start]fi [cite: 25]
+          else
+            echo "No backup found, starting fresh."
+          fi
           
           # Restore Tailscale state (separate due to /var/lib requirements)
-          [cite_start]if [ -f ${BACKUP_DATA_DIR}/tailscaled.state ]; [cite: 25, 26]
-          [cite_start]then [cite: 26]
-            [cite_start]sudo mkdir -p /var/lib/tailscale [cite: 26]
-            [cite_start]sudo cp ${BACKUP_DATA_DIR}/tailscaled.state /var/lib/tailscale/tailscaled.state [cite: 26]
-            [cite_start]sudo chmod 600 /var/lib/tailscale/tailscaled.state [cite: 26]
-            [cite_start]echo "Tailscale state restored." [cite: 26]
-          [cite_start]fi [cite: 27]
+          if [ -f ${BACKUP_DATA_DIR}/tailscaled.state ];
+          then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp ${BACKUP_DATA_DIR}/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            echo "Tailscale state restored."
+          fi
  
       # --- Networking and Service Installation Steps ---
       
       - name: 🌐 Install Networking Tools (Tailscale, Cloudflared, Playit)
         run: |
           # Install Tailscale
-          [cite_start]curl -fsSL https://tailscale.com/install.sh | [cite: 28]
-          [cite_start]sh [cite: 29]
+          curl -fsSL https://tailscale.com/install.sh |
+          sh
           
           # Install Cloudflared
-          [cite_start]curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared [cite: 29]
-          [cite_start]sudo install cloudflared /usr/local/bin/cloudflared [cite: 29]
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          sudo install cloudflared /usr/local/bin/cloudflared
           
           # Install Playit.gg Agent
-          [cite_start]echo "Setting up Playit.gg PPA..." [cite: 29]
-          [cite_start]curl -SsL https://playit-cloud.github.io/ppa/key.gpg | [cite: 29, 30]
-          [cite_start]gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null [cite: 30]
-          [cite_start]echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | [cite: 30, 31]
-          [cite_start]sudo tee /etc/apt/sources.list.d/playit-cloud.list [cite: 31]
-          [cite_start]sudo apt update [cite: 31]
-          [cite_start]sudo apt install -y playit [cite: 31]
+          echo "Setting up Playit.gg PPA..."
+          curl -SsL https://playit-cloud.github.io/ppa/key.gpg |
+          gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null
+          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" |
+          sudo tee /etc/apt/sources.list.d/playit-cloud.list
+          sudo apt update
+          sudo apt install -y playit
           
       - name: 🔑 Configure Root User and SSH Access
         run: |
           # This script handles root user setup
-          [cite_start]curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root -o /tmp/root_setup.sh [cite: 32]
-          [cite_start]chmod +x /tmp/root_setup.sh [cite: 32]
-          [cite_start]sudo /tmp/root_setup.sh [cite: 32]
-          [cite_start]echo "root:root" | [cite: 32, 33]
-          [cite_start]sudo chpasswd [cite: 33]
-          [cite_start]echo "root ALL=(ALL) NOPASSWD:ALL" | [cite: 33, 34]
-          [cite_start]sudo tee /etc/sudoers.d/root [cite: 34]
-          [cite_start]sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config [cite: 34]
-          [cite_start]sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config [cite: 34]
-          [cite_start]sudo systemctl restart ssh || [cite: 34, 35]
-          [cite_start]echo "SSH restart failed, continuing." [cite: 35]
+          curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root -o /tmp/root_setup.sh
+          chmod +x /tmp/root_setup.sh
+          sudo /tmp/root_setup.sh
+          echo "root:root" |
+          sudo chpasswd
+          echo "root ALL=(ALL) NOPASSWD:ALL" |
+          sudo tee /etc/sudoers.d/root
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh ||
+          echo "SSH restart failed, continuing."
 
       - name: 🚀 Start Networking Services & Database
         run: |
           # Start Database
-          [cite_start]sudo systemctl start mariadb || [cite: 36]
-          [cite_start]sudo systemctl start mysql || echo "Database service start failed." [cite: 37]
+          sudo systemctl start mariadb ||
+          sudo systemctl start mysql || echo "Database service start failed."
           # Restore Pterodactyl Database
-          [cite_start]if [ -f /opt/vps-backup/data/pterodactyl_db.sql ]; [cite: 38]
-          [cite_start]then [cite: 39]
-              [cite_start]echo "Re-importing Pterodactyl database..." [cite: 39]
+          if [ -f /opt/vps-backup/data/pterodactyl_db.sql ];
+          then
+              echo "Re-importing Pterodactyl database..."
               # Note: Ensure the 'panel' database exists before running this.
-              [cite_start]sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret." [cite: 40]
-          [cite_start]fi [cite: 41]
+              sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
+          fi
           
           # Start Tailscale
           sudo tailscaled &
           
-          # *** FIX: Wait for the daemon socket before running 'tailscale up' ***
+          # FIX: Wait for the daemon socket before running 'tailscale up'
           TS_SOCK="/var/run/tailscale/tailscaled.sock"
           echo "Waiting for Tailscale daemon socket at ${TS_SOCK}..."
           for i in {1..20}; do
@@ -188,34 +187,34 @@ jobs:
             sleep 1
           done
           
-          [cite_start]sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || [cite: 41, 42]
-          [cite_start]echo "Tailscale already up/error" [cite: 42]
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset ||
+          echo "Tailscale already up/error"
           
           # Start Cloudflare Tunnel
-          [cite_start]CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]') [cite: 42]
-          [cite_start]sudo /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" & [cite: 42]
+          CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
+          sudo /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
           
           # Start Playit.gg
-          [cite_start]playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & [cite: 42]
+          playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} &
    
           # Start Tailscale Funnel
-          [cite_start]echo "Starting Tailscale Funnel on port 80..." [cite: 43]
-          [cite_start]sudo tailscale funnel 8080 on & # Replace '8080' with your actual internal service port. [cite: 43]
-          [cite_start]sleep 5 [cite: 44]
+          echo "Starting Tailscale Funnel on port 80..."
+          sudo tailscale funnel 8080 on & # Replace '8080' with your actual internal service port.
+          sleep 5
 
       - name: Start Tmate Server (Non-Blocking)
         run: tmate -S /tmp/tmate.sock new-session -d
  
       - name: 📣 VPS Connection Details (Ultimate Access)
         run: |
-          [cite_start]echo "==========================================" [cite: 45]
-          [cite_start]echo "⭐ Access Details" [cite: 45]
-          [cite_start]echo "------------------------------------------" [cite: 45]
-          [cite_start]echo "📍 Tailscale MagicDNS Name: root" [cite: 45]
-          [cite_start]echo "💻 Tailscale IP (Internal VPN):" [cite: 45]
-          [cite_start]tailscale ip -4 || [cite: 45, 46]
-          [cite_start]echo "Tailscale IP not found" [cite: 46]
-          [cite_start]echo "==========================================" [cite: 46]
+          echo "=========================================="
+          echo "⭐ Access Details"
+          echo "------------------------------------------"
+          echo "📍 Tailscale MagicDNS Name: root"
+          echo "💻 Tailscale IP (Internal VPN):"
+          tailscale ip -4 ||
+          echo "Tailscale IP not found"
+          echo "=========================================="
  
       - name: Sleep to Keep VPS Alive (6 Hours)
         run: sleep 21600
@@ -224,70 +223,69 @@ jobs:
       - name: 💾 Create Backup Archive (FULL CONFIGURATION PERSISTENCE)
         if: always()
         run: |
-          [cite_start]BACKUP_DIR="/opt/vps-backup" [cite: 47]
-          [cite_start]BACKUP_DATA_DIR="${BACKUP_DIR}/data" [cite: 47]
+          BACKUP_DIR="/opt/vps-backup"
+          BACKUP_DATA_DIR="${BACKUP_DIR}/data"
           
           # --- DUMP DATABASE ---
           echo "Attempting to dump Pterodactyl database..."
-          # *** FIX: Ensure database is running and wait before dump ***
+          # FIX: Ensure database is running and wait before dump
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
           sleep 5
           sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || \
-          [cite_start]echo "DB DUMP FAILED. Continuing. (Check DB password secret)" [cite: 48, 49]
+          echo "DB DUMP FAILED. Continuing. (Check DB password secret)"
           
           # --- START COPYING AND BACKUP UP ---
           
           # 1. /root/ contents
-          [cite_start]echo "Copying /root directory contents..." [cite: 49]
-          [cite_start]sudo mkdir -p ${BACKUP_DATA_DIR}/root_home [cite: 49]
-          sudo cp -a /root/. [cite_start]${BACKUP_DATA_DIR}/root_home/ [cite: 49, 50]
+          echo "Copying /root directory contents..."
+          sudo mkdir -p ${BACKUP_DATA_DIR}/root_home
+          sudo cp -a /root/. ${BACKUP_DATA_DIR}/root_home/
 
           # 2. /incase/ folder (New requirement)
-          [cite_start]echo "Copying /incase directory contents..." [cite: 50]
-          [cite_start]sudo mkdir -p ${BACKUP_DATA_DIR}/incase [cite: 50]
-          [cite_start]if [ -d /incase ]; [cite: 50, 51]
-          [cite_start]then [cite: 51]
-            sudo cp -a /incase/. [cite_start]${BACKUP_DATA_DIR}/incase/ [cite: 51, 52]
-          [cite_start]else [cite: 52]
-            [cite_start]echo "/incase directory does not exist yet. Skipping." [cite: 53]
-          [cite_start]fi [cite: 53]
+          echo "Copying /incase directory contents..."
+          sudo mkdir -p ${BACKUP_DATA_DIR}/incase
+          if [ -d /incase ];
+          then
+            sudo cp -a /incase/. ${BACKUP_DATA_DIR}/incase/
+          else
+            echo "/incase directory does not exist yet. Skipping."
+          fi
           
           # 3. Pterodactyl Panel files
-          [cite_start]echo "Copying Pterodactyl Panel files (if present)..." [cite: 53]
-          [cite_start]sudo mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_panel [cite: 53]
-          [cite_start]if [ -d /var/www/pterodactyl ]; [cite: 53, 54]
-          [cite_start]then [cite: 54]
-            sudo cp -a /var/www/pterodactyl/. [cite_start]${BACKUP_DATA_DIR}/pterodactyl_panel/ [cite: 54, 55]
-          [cite_start]fi [cite: 55]
+          echo "Copying Pterodactyl Panel files (if present)..."
+          sudo mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_panel
+          if [ -d /var/www/pterodactyl ];
+          then
+            sudo cp -a /var/www/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_panel/
+          fi
           
           # 4. Pterodactyl Wings/Server data
-          [cite_start]echo "Copying Pterodactyl Wings/Server data (if present)..." [cite: 55]
-          [cite_start]sudo mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_wings [cite: 55]
-          [cite_start]if [ -d /var/lib/pterodactyl ]; [cite: 55, 56]
-          [cite_start]then [cite: 56]
-            sudo cp -a /var/lib/pterodactyl/. [cite_start]${BACKUP_DATA_DIR}/pterodactyl_wings/ [cite: 56, 57]
-          [cite_start]fi [cite: 57]
+          echo "Copying Pterodactyl Wings/Server data (if present)..."
+          sudo mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_wings
+          if [ -d /var/lib/pterodactyl ];
+          then
+            sudo cp -a /var/lib/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_wings/
+          fi
           
           # 5. Tailscale state
-          [cite_start]echo "Copying Tailscale state..." [cite: 57]
-          [cite_start]sudo cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/ [cite: 57]
+          echo "Copying Tailscale state..."
+          sudo cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/
 
           # 6. Nginx/Systemd configs (Existing logic)
-          [cite_start]sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd [cite: 57]
-          if [ -d /etc/nginx ]; then sudo cp -a /etc/nginx/. [cite_start]${BACKUP_DATA_DIR}/etc_nginx/; fi [cite: 58]
-          [cite_start]if [ -d /etc/systemd/system ]; [cite: 58, 59]
-          then sudo cp -a /etc/systemd/system/. [cite_start]${BACKUP_DATA_DIR}/etc_systemd/; fi [cite: 59]
+          sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd
+          if [ -d /etc/nginx ]; then sudo cp -a /etc/nginx/. ${BACKUP_DATA_DIR}/etc_nginx/; fi
+          if [ -d /etc/systemd/system ];
+          then sudo cp -a /etc/systemd/system/. ${BACKUP_DATA_DIR}/etc_systemd/; fi
 
           # --- CLEANUP AND ZIP ---
           
           # Cleanup cache/temporary files before zipping
-          [cite_start]sudo rm -rf ${BACKUP_DATA_DIR}/root_home/.cache ${BACKUP_DATA_DIR}/root_home/.tmate.sock ${BACKUP_DATA_DIR}/root_home/.bash_history [cite: 59]
+          sudo rm -rf ${BACKUP_DATA_DIR}/root_home/.cache ${BACKUP_DATA_DIR}/root_home/.tmate.sock ${BACKUP_DATA_DIR}/root_home/.bash_history
           
           # Set ownership so the non-sudo runner user can zip the file
-          [cite_start]sudo chown -R $USER:$USER ${BACKUP_DIR} [cite: 60]
+          sudo chown -R $USER:$USER ${BACKUP_DIR}
           
-          # Create the final zip archive of the entire staging directory
-          # *** FIX: Change directory to $GITHUB_WORKSPACE before zipping ***
+          # FIX: Change directory to $GITHUB_WORKSPACE before zipping
           cd $GITHUB_WORKSPACE
           zip -r backup.zip ${BACKUP_DIR}
  
@@ -296,27 +294,28 @@ jobs:
         id: cpr
         uses: peter-evans/create-pull-request@v6
  
-        [cite_start]if: always() [cite: 61]
+        if: always()
         with:
-          [cite_start]token: ${{ secrets.GH_TOKEN }} [cite: 61]
-          [cite_start]commit-message: '🤖 Automated Backup: Workflow ${{ github.run_id }}' [cite: 61]
-          [cite_start]title: 'Auto-Merge Backup: Workflow ${{ github.run_id }}' [cite: 61]
-          [cite_start]branch: backup-auto-merge-${{ github.run_id }} [cite: 61]
-          [cite_start]base: backup [cite: 61]
-          [cite_start]body: [cite: 61]
-            [cite_start]| [cite: 62]
-            [cite_start]Automated workflow run created a new backup. [cite: 62]
-            [cite_start]This Pull Request will be merged automatically. [cite: 62]
-          [cite_start]add-paths: backup.zip [cite: 63]
+          token: ${{ secrets.GH_TOKEN }} 
+          commit-message: '🤖 Automated Backup: Workflow ${{ github.run_id }}'
+          title: 'Auto-Merge Backup: Workflow ${{ github.run_id }}'
+          branch: backup-auto-merge-${{ github.run_id }} 
+          base: backup 
+          body: 
+            |
+            Automated workflow run created a new backup.
+            This Pull Request will be merged automatically.
+          # FIX: Correct indentation for add-paths
+          add-paths: backup.zip 
 
       # 2. Immediately Merge the Pull Request
       - name: ✅ Auto-Merge the Pull Request (Human-Free Backup)
         if: steps.cpr.outputs.pull-request-number != ''
         run: |
-          [cite_start]PR_NUMBER=${{ steps.cpr.outputs.pull-request-number }} [cite: 64]
-          [cite_start]echo "Attempting to merge PR #${PR_NUMBER}..." [cite: 64]
+          PR_NUMBER=${{ steps.cpr.outputs.pull-request-number }}
+          echo "Attempting to merge PR #${PR_NUMBER}..."
           
           # Using the 'gh' CLI for a clean, reliable merge command
-          [cite_start]gh pr merge "$PR_NUMBER" --squash --delete-branch --admin [cite: 64]
+          gh pr merge "$PR_NUMBER" --squash --delete-branch --admin
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
