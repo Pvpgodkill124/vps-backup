@@ -92,7 +92,7 @@ jobs:
                 rsync -a ${BACKUP_DATA_DIR}/incase/. /incase/ || true
             fi
             
-            # Pterodactyl Panel files (Using rsync to handle empty source without crashing)
+            # Pterodactyl Panel files (Using rsync for robust copy)
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ]; then
                 echo "Restoring Pterodactyl Panel files..."
                 mkdir -p /var/www/pterodactyl
@@ -172,22 +172,23 @@ jobs:
               mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
-          # Start Tailscale Daemon robustly and wait for socket
+          # Start Tailscale Daemon using systemctl for reliability
           TS_SOCK="/var/run/tailscale/tailscaled.sock"
-          echo "Starting Tailscale daemon..."
-          nohup tailscaled > /dev/null 2>&1 &
+          echo "Starting Tailscale daemon using systemctl..."
+          sudo systemctl start tailscaled || echo "Tailscaled systemctl start failed, trying manual start."
           
-          # Wait loop for the daemon socket to appear
+          # Wait loop for the daemon socket to appear (Increased wait time)
           echo "Waiting for Tailscale daemon socket to appear at $TS_SOCK..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 45); do # Increased from 30 to 45 seconds
               if [ -S "$TS_SOCK" ]; then
                   echo "Tailscale daemon is running. Proceeding."
                   break
               fi
-              echo "Attempt $i/30: Socket not found. Sleeping 1 second..."
+              echo "Attempt $i/45: Socket not found. Sleeping 1 second..."
               sleep 1
-              if [ "$i" -eq 30 ]; then
-                  echo "WARNING: Tailscale daemon failed to start within 30 seconds. Services may not be available."
+              if [ "$i" -eq 45 ]; then
+                  echo "FATAL: Tailscale daemon failed to start within 45 seconds."
+                  echo "WARNING: Tailscale services may not be available."
                   break
               fi
           done
@@ -197,7 +198,8 @@ jobs:
 
           # Start Cloudflare Tunnel
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
-          /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
+          # CRITICAL: Run cloudflared in the background with disown to keep it alive
+          /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" & disown
           
           # Start Playit.gg
           playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & 
