@@ -19,20 +19,17 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: ⚙️ Install Core System Prerequisites & Applications (Fixing systemctl & Nginx)
+      - name: ⚙️ Install Core System Prerequisites & Applications (Fixing SSH, Systemd, Nginx)
         run: |
           # Define staging directory variables
           BACKUP_DIR="/opt/vps-backup"
           BACKUP_DATA_DIR="${BACKUP_DIR}/data"
           
-          # Install core tools required for Debian-based runner
+          # CRITICAL FIX: Add openssh-server for sshd_config and remove systemd-sysv reliance
           apt update -y
-          # CRITICAL FIX: Install systemd-sysv to provide the 'systemctl' command
-          # CRITICAL FIX: Install Nginx, PHP, and other core components for Pterodactyl setup
-          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo rsync nginx systemd-sysv lsb-release ca-certificates gnupg software-properties-common bash
-
-          # Install Pterodactyl dependencies (PHP components often required for panel files)
-          # Note: Pterodactyl Panel installation is usually complex, but we install packages to create necessary dirs/binaries
+          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo rsync nginx openssh-server lsb-release ca-certificates gnupg software-properties-common bash
+          
+          # Install Pterodactyl dependencies 
           apt install -y php-cli php-fpm php-mysql php-pdo php-mbstring php-tokenizer php-bcmath php-xml php-zip
           
           hostnamectl set-hostname root || true
@@ -40,7 +37,7 @@ jobs:
           # Create the primary backup staging directory
           mkdir -p "${BACKUP_DATA_DIR}"
           
-          # CRITICAL FIX: Ensure runner user owns the backup directory for the final zip operation
+          # Ensure runner user owns the backup directory for the final zip operation
           chown -R $(whoami):$(whoami) ${BACKUP_DIR} || true
  
       - name: 📦 Retrieve Previous Backup from 'backup' Branch
@@ -113,10 +110,7 @@ jobs:
             fi
             
             # Custom Systemd Service Files
-            if [ -d ${BACKUP_DATA_DIR}/etc_systemd ]; then
-                echo "Restoring systemd service files..."
-                sudo rsync -a ${BACKUP_DATA_DIR}/etc_systemd/. /etc/systemd/system/ || true
-            fi
+            # NOTE: Removed systemd restore since it's non-functional
             
             # --- END RESTORATION OF PERSISTENT FOLDERS ---
 
@@ -148,29 +142,42 @@ jobs:
           apt update -y
           apt install -y playit
           
-      - name: 🔑 Configure Root User and SSH Access
+      - name: 🔑 Configure Root User and SSH Access (Non-Systemd Fix)
         run: |
+          # Use the script to set up SSH keys and environment
           sh -c "$(curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root)"
           
           echo "root:root" | chpasswd
           echo "root ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/root
           
+          # Configure SSH to permit root login
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-          # Restart SSH using the installed systemctl utility
-          sudo systemctl restart ssh || echo "SSH restart failed, continuing."
+          
+          # CRITICAL FIX: Manually start the SSH daemon (sshd) directly, replacing systemctl restart ssh
+          # Note: The 'Restart SSH' part of the script linked above will still fail, but we will start it here.
+          echo "Starting SSH Daemon directly..."
+          /usr/sbin/sshd || echo "Direct SSH start failed, continuing."
 
-      - name: 🚀 Start Networking Services & Database
-        # CRITICAL FIX: Explicitly use bash to enable 'disown' and robust backgrounding
+      - name: 🚀 Start Networking Services & Database (Non-Systemd Daemon Fix)
+        # Explicitly use bash to enable 'disown' and robust backgrounding
         shell: /bin/bash {0} 
         run: |
-          # Start Database (systemctl now available)
-          sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
+          # --- FIX: Start MariaDB/MySQL Daemon directly (no systemctl) ---
+          echo "Starting MariaDB daemon directly..."
+          # This command may vary, but typically mariadbd is used for direct start
+          # We run it in the background on the default port 3306
+          /usr/sbin/mariadbd --user=mysql --basedir=/usr --datadir=/var/lib/mysql --pid-file=/var/run/mysqld/mysqld.pid --socket=/var/run/mysqld/mysqld.sock --port=3306 & disown
+          
+          # Wait briefly for the DB to initialize the socket
+          echo "Waiting 10 seconds for MariaDB to start..."
+          sleep 10
           
           # Restore Pterodactyl Database
           if [ -f /opt/vps-backup/data/pterodactyl_db.sql ];
           then
               echo "Re-importing Pterodactyl database..."
+              # Use the mysql client to connect
               mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
@@ -179,7 +186,6 @@ jobs:
           TS_STATE_DIR="/var/lib/tailscale"
           echo "Starting Tailscale daemon directly in background..."
           # Run daemon in the background, redirect output to ensure it doesn't block
-          # and explicitly specify the state directory.
           # Use nohup/disown to detach it robustly from the action script process
           nohup tailscaled --state=${TS_STATE_DIR}/tailscaled.state > /dev/null 2>&1 & disown
 
@@ -199,20 +205,23 @@ jobs:
               fi
           done
           
-          # Bring the Tailscale interface up
-          tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || echo "Tailscale UP failed, continuing."
+          # Bring the Tailscale interface up (only if the daemon started)
+          if [ -S "$TS_SOCK" ]; then
+            tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || echo "Tailscale UP failed, continuing."
+          else
+            echo "Tailscale daemon socket not found. Skipping 'tailscale up'."
+          fi
 
           # Start Cloudflare Tunnel
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
-          # CRITICAL: Run cloudflared in the background with disown (now supported by bash)
           /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" & disown
           
           # Start Playit.gg
           playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & disown
           
-          # Start Tailscale Funnel
-          echo "Starting Tailscale Funnel on port 80..."
-          tailscale funnel 8080 on & disown
+          # CRITICAL FIX: Tailscale Funnel command syntax is now 'serve'
+          echo "Starting Tailscale Funnel on port 8080..."
+          tailscale serve 8080 http://localhost:8080 & disown
 
           sleep 5
 
@@ -226,8 +235,13 @@ jobs:
           echo "------------------------------------------"
           echo "📍 Tailscale MagicDNS Name: root"
           echo "💻 Tailscale IP (Internal VPN):"
-          # This should now work as the daemon is started directly
-          tailscale ip -4 || echo "Tailscale IP not found"
+          # Get IP only if the daemon socket exists
+          TS_SOCK="/var/run/tailscale/tailscaled.sock"
+          if [ -S "$TS_SOCK" ]; then
+             tailscale ip -4 || echo "Tailscale IP not found (Post-Startup Failure)"
+          else
+             echo "Tailscale daemon socket not available. IP unknown."
+          fi
           echo "=========================================="
  
       - name: Sleep to Keep VPS Alive (6 Hours)
@@ -242,7 +256,8 @@ jobs:
           
           # --- DUMP DATABASE ---
           echo "Attempting to dump Pterodactyl database..."
-          sudo systemctl start mariadb 2>/dev/null || true
+          # Since systemctl is unreliable, assume the mariadbd process is still running from the earlier step.
+          # We don't try to restart it here, just dump the data.
           mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED. Continuing."
           
           # --- START COPYING LIVE DATA INTO STAGING ---
@@ -266,7 +281,7 @@ jobs:
           echo "Copying Pterodactyl Panel files (if present)..."
           mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_panel
           if [ -d /var/www/pterodactyl ]; then
-            rsync -a /var/www/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_panel/ || true
+            rsync -a /var/www/pterodactyl/. /${BACKUP_DATA_DIR}/pterodactyl_panel/ || true
           fi
           
           # 4. Pterodactyl Wings/Server data (Using rsync for robust copy)
@@ -283,8 +298,8 @@ jobs:
           # 6. Nginx/Systemd configs (Using rsync for robust copy)
           sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd
           if [ -d /etc/nginx ]; then sudo rsync -a /etc/nginx/. ${BACKUP_DATA_DIR}/etc_nginx/; fi
-          if [ -d /etc/systemd/system ]; then sudo rsync -a /etc/systemd/system/. ${BACKUP_DATA_DIR}/etc_systemd/; fi
-
+          # Removed /etc/systemd/system backup as it's not being used for restoration
+          
           # --- ZIP THE STAGING AREA ---
           
           # Cleanup cache/temporary files before zipping
