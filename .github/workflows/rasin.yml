@@ -19,13 +19,13 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: ⚙️ Install Core System Prerequisites & Applications (Fixing SSH, Systemd, Nginx)
+      - name: ⚙️ Install Core System Prerequisites & Applications
         run: |
           # Define staging directory variables
           BACKUP_DIR="/opt/vps-backup"
           BACKUP_DATA_DIR="${BACKUP_DIR}/data"
           
-          # CRITICAL FIX: Add openssh-server for sshd_config and remove systemd-sysv reliance
+          # Install core packages, including openssh-server (for sshd_config) and bash (for disown)
           apt update -y
           apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo rsync nginx openssh-server lsb-release ca-certificates gnupg software-properties-common bash
           
@@ -37,7 +37,7 @@ jobs:
           # Create the primary backup staging directory
           mkdir -p "${BACKUP_DATA_DIR}"
           
-          # Ensure runner user owns the backup directory for the final zip operation
+          # Ensure runner user owns the backup directory
           chown -R $(whoami):$(whoami) ${BACKUP_DIR} || true
  
       - name: 📦 Retrieve Previous Backup from 'backup' Branch
@@ -60,7 +60,7 @@ jobs:
           rm -rf ${BACKUP_REPO_DIR}
           echo "::endgroup::"
           
-      - name: 🔄 Restore Files and Tailscale State (CRASH-PROOF COPY LOGIC)
+      - name: 🔄 Restore Files and Tailscale State
         run: |
           echo "Restoring previous session files..."
           BACKUP_DATA_DIR="/opt/vps-backup/data"
@@ -89,7 +89,7 @@ jobs:
                 rsync -a ${BACKUP_DATA_DIR}/incase/. /incase/ || true
             fi
             
-            # Pterodactyl Panel files (Using rsync for robust copy)
+            # Pterodactyl Panel files
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ]; then
                 echo "Restoring Pterodactyl Panel files..."
                 mkdir -p /var/www/pterodactyl
@@ -103,14 +103,11 @@ jobs:
                 rsync -a ${BACKUP_DATA_DIR}/pterodactyl_wings/. /var/lib/pterodactyl/ || true
             fi
             
-            # Nginx Configuration (Nginx is now installed, so /etc/nginx exists)
+            # Nginx Configuration
             if [ -d ${BACKUP_DATA_DIR}/etc_nginx ]; then
                 echo "Restoring Nginx configuration..."
                 sudo rsync -a ${BACKUP_DATA_DIR}/etc_nginx/. /etc/nginx/ || true
             fi
-            
-            # Custom Systemd Service Files
-            # NOTE: Removed systemd restore since it's non-functional
             
             # --- END RESTORATION OF PERSISTENT FOLDERS ---
 
@@ -154,22 +151,29 @@ jobs:
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           
-          # CRITICAL FIX: Manually start the SSH daemon (sshd) directly, replacing systemctl restart ssh
-          # Note: The 'Restart SSH' part of the script linked above will still fail, but we will start it here.
+          # CRITICAL FIX: Manually start the SSH daemon (sshd) directly
           echo "Starting SSH Daemon directly..."
           /usr/sbin/sshd || echo "Direct SSH start failed, continuing."
 
-      - name: 🚀 Start Networking Services & Database (Non-Systemd Daemon Fix)
-        # Explicitly use bash to enable 'disown' and robust backgrounding
+      - name: 🚀 Start Networking Services & Database (Crash-Proof Daemon Fixes)
+        # Use bash for robust backgrounding with 'disown'
         shell: /bin/bash {0} 
         run: |
+          # --- CRITICAL FIX: Ensure MySQL/MariaDB socket directory exists and has permissions ---
+          MYSQL_SOCK_DIR="/var/run/mysqld"
+          MYSQL_SOCK_FILE="${MYSQL_SOCK_DIR}/mysqld.sock"
+          echo "Creating MySQL socket directory: ${MYSQL_SOCK_DIR}"
+          mkdir -p ${MYSQL_SOCK_DIR}
+          chown -R mysql:mysql ${MYSQL_SOCK_DIR}
+          chmod 777 ${MYSQL_SOCK_DIR} # Loosening permissions for container environment
+          
           # --- FIX: Start MariaDB/MySQL Daemon directly (no systemctl) ---
           echo "Starting MariaDB daemon directly..."
-          # This command may vary, but typically mariadbd is used for direct start
-          # We run it in the background on the default port 3306
-          /usr/sbin/mariadbd --user=mysql --basedir=/usr --datadir=/var/lib/mysql --pid-file=/var/run/mysqld/mysqld.pid --socket=/var/run/mysqld/mysqld.sock --port=3306 & disown
+          # Start mariadbd, explicitly setting the socket path to the one we created
+          # Use nohup/disown to robustly detach the process
+          nohup /usr/sbin/mariadbd --user=mysql --basedir=/usr --datadir=/var/lib/mysql --pid-file=/var/run/mysqld/mysqld.pid --socket=${MYSQL_SOCK_FILE} --port=3306 > /dev/null 2>&1 & disown
           
-          # Wait briefly for the DB to initialize the socket
+          # Wait 10 seconds for the DB to initialize the socket
           echo "Waiting 10 seconds for MariaDB to start..."
           sleep 10
           
@@ -177,19 +181,17 @@ jobs:
           if [ -f /opt/vps-backup/data/pterodactyl_db.sql ];
           then
               echo "Re-importing Pterodactyl database..."
-              # Use the mysql client to connect
-              mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
+              # Use the mysql client, explicitly passing the correct socket path
+              mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} --socket=${MYSQL_SOCK_FILE} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
-          # --- FIX: Run tailscaled directly with nohup/disown for container resilience ---
+          # --- FIX: Run tailscaled directly with nohup/disown ---
           TS_SOCK="/var/run/tailscale/tailscaled.sock"
           TS_STATE_DIR="/var/lib/tailscale"
           echo "Starting Tailscale daemon directly in background..."
-          # Run daemon in the background, redirect output to ensure it doesn't block
-          # Use nohup/disown to detach it robustly from the action script process
           nohup tailscaled --state=${TS_STATE_DIR}/tailscaled.state > /dev/null 2>&1 & disown
 
-          # Wait loop for the daemon socket to appear (Increased wait time)
+          # Wait loop for the daemon socket to appear
           echo "Waiting for Tailscale daemon socket to appear at $TS_SOCK..."
           for i in $(seq 1 45); do 
               if [ -S "$TS_SOCK" ]; then
@@ -219,7 +221,7 @@ jobs:
           # Start Playit.gg
           playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & disown
           
-          # CRITICAL FIX: Tailscale Funnel command syntax is now 'serve'
+          # CRITICAL FIX: Tailscale Funnel command syntax
           echo "Starting Tailscale Funnel on port 8080..."
           tailscale serve 8080 http://localhost:8080 & disown
 
@@ -255,10 +257,12 @@ jobs:
           BACKUP_DATA_DIR="${BACKUP_DIR}/data"
           
           # --- DUMP DATABASE ---
+          # Define the correct socket path again for the backup step
+          MYSQL_SOCK_FILE="/var/run/mysqld/mysqld.sock"
+          
           echo "Attempting to dump Pterodactyl database..."
-          # Since systemctl is unreliable, assume the mariadbd process is still running from the earlier step.
-          # We don't try to restart it here, just dump the data.
-          mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED. Continuing."
+          # Pass the socket path explicitly to mysqldump
+          mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} --socket=${MYSQL_SOCK_FILE} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED. Continuing."
           
           # --- START COPYING LIVE DATA INTO STAGING ---
           
@@ -277,14 +281,14 @@ jobs:
             echo "/incase directory does not exist yet. Skipping."
           fi
           
-          # 3. Pterodactyl Panel files (Using rsync for robust copy)
+          # 3. Pterodactyl Panel files
           echo "Copying Pterodactyl Panel files (if present)..."
           mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_panel
           if [ -d /var/www/pterodactyl ]; then
             rsync -a /var/www/pterodactyl/. /${BACKUP_DATA_DIR}/pterodactyl_panel/ || true
           fi
           
-          # 4. Pterodactyl Wings/Server data (Using rsync for robust copy)
+          # 4. Pterodactyl Wings/Server data
           echo "Copying Pterodactyl Wings/Server data (if present)..."
           mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_wings
           if [ -d /var/lib/pterodactyl ]; then
@@ -295,36 +299,32 @@ jobs:
           echo "Copying Tailscale state (allowing failure if service is down)..."
           cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/ || true 
 
-          # 6. Nginx/Systemd configs (Using rsync for robust copy)
+          # 6. Nginx/Systemd configs
           sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd
           if [ -d /etc/nginx ]; then sudo rsync -a /etc/nginx/. ${BACKUP_DATA_DIR}/etc_nginx/; fi
-          # Removed /etc/systemd/system backup as it's not being used for restoration
           
           # --- ZIP THE STAGING AREA ---
           
           # Cleanup cache/temporary files before zipping
           rm -rf ${BACKUP_DATA_DIR}/root_home/.cache ${BACKUP_DATA_DIR}/root_home/.tmate.sock ${BACKUP_DATA_DIR}/root_home/.bash_history
           
-          # Set ownership for the host to handle the file (user in container is root, but $USER might be runner)
+          # Set ownership for the host to handle the file
           chown -R $(whoami):$(whoami) ${BACKUP_DIR}
           
-          # CRITICAL FIX: Zip the file directly in the workspace root, referencing the absolute path of the backup directory
+          # Zip the file directly in the workspace root
           zip -r backup.zip ${BACKUP_DIR}
  
       - name: ✅ Atomic Force-Push New Backup to 'backup' Branch (SHELL-NATIVE FIX)
         if: always()
         run: |
-          # CRITICAL FIX: Ensure we are in the repository root (where checkout placed files)
           cd $GITHUB_WORKSPACE
           
-          # Initialize git and force push the new backup.zip
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           
-          # Add the zip file created in the previous step
           git add backup.zip
           
-          # Check if there are any changes to commit before committing
+          # Check if there are any changes to commit
           if git status --porcelain | grep -q .; then
             git commit -m '🤖 Automated Backup: Workflow ${{ github.run_id }}'
             # Force push the new backup, creating the branch if necessary
