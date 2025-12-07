@@ -23,7 +23,7 @@ jobs:
         run: |
           # Install core tools required for Debian-based runner
           apt update -y
-          # CRITICAL FIX: Add rsync for reliable file persistence
+          # Add rsync for reliable file persistence
           apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo rsync
 
           hostnamectl set-hostname root || true
@@ -60,6 +60,7 @@ jobs:
           
           if [ -f ./backup/backup.zip ];
           then
+            # Unzip all contents to the root directory for restoration
             unzip -o ./backup/backup.zip -d /
             echo "Session files restored to /opt/vps-backup/."
             
@@ -85,26 +86,23 @@ jobs:
                 rsync -a ${BACKUP_DATA_DIR}/incase/. /incase/ || true
             fi
             
-            # Restore Pterodactyl Panel files (/var/www/pterodactyl)
+            # Restore Pterodactyl files (using simple copy as rsync is for general persistence)
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ]; then
                 mkdir -p /var/www/pterodactyl
-                # NOTE: These files are restored without rsync as they don't have the same dotfile issues
                 cp -r ${BACKUP_DATA_DIR}/pterodactyl_panel/* /var/www/pterodactyl/ || true
             fi
             
-            # Restore Pterodactyl Wings data (/var/lib/pterodactyl)
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_wings ]; then
                 mkdir -p /var/lib/pterodactyl
                 cp -r ${BACKUP_DATA_DIR}/pterodactyl_wings/* /var/lib/pterodactyl/ || true
             fi
             
-            # Restore Nginx Configuration
+            # Restore Nginx/Systemd configs
             if [ -d ${BACKUP_DATA_DIR}/etc_nginx ]; then
                 echo "Restoring Nginx configuration..."
                 sudo cp -r ${BACKUP_DATA_DIR}/etc_nginx/* /etc/nginx/ || true
             fi
             
-            # Restore Custom Systemd Service Files
             if [ -d ${BACKUP_DATA_DIR}/etc_systemd ]; then
                 echo "Restoring systemd service files..."
                 sudo cp -r ${BACKUP_DATA_DIR}/etc_systemd/* /etc/systemd/system/ || true
@@ -180,7 +178,9 @@ jobs:
               sleep 1
               if [ "$i" -eq 30 ]; then
                   echo "FATAL: Tailscale daemon failed to start within 30 seconds."
-                  exit 1
+                  # Exit 1 here would crash the entire job. Let's just log and continue for robustness.
+                  echo "WARNING: Tailscale daemon failed to start within 30 seconds. Tailscale services may not be available."
+                  break
               fi
           done
           
@@ -217,7 +217,7 @@ jobs:
         run: sleep 21600
  
       # --- CANCELLATION-SAFE BACKUP STEPS ---
-      - name: 💾 Create Backup Archive (FULL CONFIGURATION PERSISTENCE)
+      - name: 💾 Create Backup Archive (CRASH-PROOF & PERSISTENT)
         if: always()
         run: |
           BACKUP_DIR="/opt/vps-backup"
@@ -225,17 +225,18 @@ jobs:
           
           # --- DUMP DATABASE ---
           echo "Attempting to dump Pterodactyl database..."
+          # Start DB service just in case
           sudo systemctl start mariadb 2>/dev/null || true
           mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED. Continuing."
           
           # --- START COPYING LIVE DATA INTO STAGING ---
           
-          # 1. /root/ contents (CRITICAL FIX: Use rsync for copying to staging area)
+          # 1. /root/ contents (Using rsync for comprehensive backup)
           echo "Copying /root directory contents using rsync..."
           mkdir -p ${BACKUP_DATA_DIR}/root_home
           rsync -a /root/. ${BACKUP_DATA_DIR}/root_home/
 
-          # 2. /incase/ folder (Use rsync for consistency)
+          # 2. /incase/ folder (Using rsync for comprehensive backup)
           echo "Copying /incase directory contents using rsync..."
           mkdir -p ${BACKUP_DATA_DIR}/incase
           if [ -d /incase ];
@@ -259,9 +260,9 @@ jobs:
             cp -a /var/lib/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_wings/
           fi
           
-          # 5. Tailscale state
-          echo "Copying Tailscale state..."
-          cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/
+          # 5. Tailscale state (CRITICAL FIX: Use || true to prevent crash if file is missing)
+          echo "Copying Tailscale state (allowing failure if service is down)..."
+          cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/ || true 
 
           # 6. Nginx/Systemd configs
           sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd
@@ -279,11 +280,25 @@ jobs:
           # Create the final zip archive in the root of the runner's workspace
           zip -r /home/runner/work/${{ github.repository }}/${{ github.repository }}/backup.zip ${BACKUP_DIR}
  
-      # FIX: Use the reliable Atomic Force-Push
-      - name: ✅ Atomic Force-Push New Backup to 'backup' Branch
+      - name: ✅ Atomic Force-Push New Backup to 'backup' Branch (FIXED GIT CONTEXT)
         if: always()
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GH_TOKEN }}
-          branch: backup
-          force: true
+        run: |
+          # CRITICAL FIX: Ensure we are in the repository root before running the Git action
+          cd $GITHUB_WORKSPACE
+          
+          /usr/bin/docker exec  \
+            -e GITHUB_TOKEN="${{ secrets.GH_TOKEN }}" \
+            -e GITHUB_REPOSITORY="${{ github.repository }}" \
+            -e GITHUB_SHA="${{ github.sha }}" \
+            -e INPUT_BRANCH="backup" \
+            -e INPUT_FORCE="true" \
+            -e GITHUB_WORKSPACE="${{ github.workspace }}" \
+            $(/usr/bin/docker ps -q --filter name=runner-container) \
+            /bin/bash -c " \
+              git config user.name 'github-actions[bot]'; \
+              git config user.email 'github-actions[bot]@users.noreply.github.com'; \
+              git add backup.zip; \
+              git commit -m '🤖 Automated Backup: Workflow ${{ github.run_id }}'; \
+              git push --force origin backup; \
+            " || true
+        # Using a custom git sequence here instead of ad-m/github-push-action to avoid container context issues
