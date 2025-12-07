@@ -1,4 +1,4 @@
-name: VPS 24/7
+name: VPS 24/7 (Debian 11 Container)
 
 on:
   schedule:
@@ -71,6 +71,10 @@ jobs:
                 echo "Restoring /root contents using rsync..."
                 # rsync -a copies everything recursively, preserves ownership/permissions, and handles dotfiles naturally.
                 rsync -a ${BACKUP_DATA_DIR}/root_home/. /root/ || true
+                
+                # Force correct permissions and ownership on restored root files
+                chown -R root:root /root || true
+                chmod -R 700 /root || true
             fi
             
             # Restore /incase folder using rsync
@@ -84,6 +88,7 @@ jobs:
             # Restore Pterodactyl Panel files (/var/www/pterodactyl)
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ]; then
                 mkdir -p /var/www/pterodactyl
+                # NOTE: These files are restored without rsync as they don't have the same dotfile issues
                 cp -r ${BACKUP_DATA_DIR}/pterodactyl_panel/* /var/www/pterodactyl/ || true
             fi
             
@@ -225,17 +230,17 @@ jobs:
           
           # --- START COPYING LIVE DATA INTO STAGING ---
           
-          # 1. /root/ contents (cp -a copies everything recursively, including dotfiles and preserves ownership/permissions)
-          echo "Copying /root directory contents..."
+          # 1. /root/ contents (CRITICAL FIX: Use rsync for copying to staging area)
+          echo "Copying /root directory contents using rsync..."
           mkdir -p ${BACKUP_DATA_DIR}/root_home
-          cp -a /root/. ${BACKUP_DATA_DIR}/root_home/
+          rsync -a /root/. ${BACKUP_DATA_DIR}/root_home/
 
-          # 2. /incase/ folder 
-          echo "Copying /incase directory contents..."
+          # 2. /incase/ folder (Use rsync for consistency)
+          echo "Copying /incase directory contents using rsync..."
           mkdir -p ${BACKUP_DATA_DIR}/incase
           if [ -d /incase ];
           then
-            cp -a /incase/. ${BACKUP_DATA_DIR}/incase/
+            rsync -a /incase/. ${BACKUP_DATA_DIR}/incase/
           else
             echo "/incase directory does not exist yet. Skipping."
           fi
