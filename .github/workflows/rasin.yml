@@ -19,19 +19,29 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory (Adding rsync)
+      - name: ⚙️ Install Core System Prerequisites & Applications (Fixing systemctl & Nginx)
         run: |
-          # Install core tools required for Debian-based runner
-          apt update -y
-          # Add rsync for reliable file persistence
-          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo rsync
-
-          hostnamectl set-hostname root || true
-          
+          # Define staging directory variables
           BACKUP_DIR="/opt/vps-backup"
           BACKUP_DATA_DIR="${BACKUP_DIR}/data"
           
+          # Install core tools required for Debian-based runner
+          apt update -y
+          # CRITICAL FIX: Install systemd-sysv to provide the 'systemctl' command
+          # CRITICAL FIX: Install Nginx, PHP, and other core components for Pterodactyl setup
+          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo rsync nginx systemd-sysv lsb-release ca-certificates gnupg software-properties-common
+
+          # Install Pterodactyl dependencies (PHP components often required for panel files)
+          # Note: Pterodactyl Panel installation is usually complex, but we install packages to create necessary dirs/binaries
+          apt install -y php-cli php-fpm php-mysql php-pdo php-mbstring php-tokenizer php-bcmath php-xml php-zip
+          
+          hostnamectl set-hostname root || true
+          
+          # Create the primary backup staging directory
           mkdir -p "${BACKUP_DATA_DIR}"
+          
+          # CRITICAL FIX: Ensure runner user owns the backup directory for the final zip operation
+          chown -R $(whoami):$(whoami) ${BACKUP_DIR} || true
  
       - name: 📦 Retrieve Previous Backup from 'backup' Branch
         run: |
@@ -53,7 +63,7 @@ jobs:
           rm -rf ${BACKUP_REPO_DIR}
           echo "::endgroup::"
           
-      - name: 🔄 Restore Files and Tailscale State (rsync FIX)
+      - name: 🔄 Restore Files and Tailscale State (CRASH-PROOF COPY LOGIC)
         run: |
           echo "Restoring previous session files..."
           BACKUP_DATA_DIR="/opt/vps-backup/data"
@@ -66,19 +76,15 @@ jobs:
             
             # --- START RESTORATION OF PERSISTENT FOLDERS ---
             
-            # 🔑 CRITICAL FIX: Use rsync for robust restoration of /root home, including all hidden files/folders.
+            # 🔑 /root/ contents (Uses rsync for robust dotfile persistence)
             if [ -d ${BACKUP_DATA_DIR}/root_home ];
             then
                 echo "Restoring /root contents using rsync..."
-                # rsync -a copies everything recursively, preserves ownership/permissions, and handles dotfiles naturally.
                 rsync -a ${BACKUP_DATA_DIR}/root_home/. /root/ || true
-                
-                # Force correct permissions and ownership on restored root files
                 chown -R root:root /root || true
-                chmod -R 700 /root || true
             fi
             
-            # Restore /incase folder using rsync
+            # /incase folder
             if [ -d ${BACKUP_DATA_DIR}/incase ];
             then
                 echo "Restoring /incase contents using rsync..."
@@ -86,27 +92,30 @@ jobs:
                 rsync -a ${BACKUP_DATA_DIR}/incase/. /incase/ || true
             fi
             
-            # Restore Pterodactyl files (using simple copy as rsync is for general persistence)
+            # Pterodactyl Panel files (Using rsync to handle empty source without crashing)
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_panel ]; then
+                echo "Restoring Pterodactyl Panel files..."
                 mkdir -p /var/www/pterodactyl
-                cp -r ${BACKUP_DATA_DIR}/pterodactyl_panel/* /var/www/pterodactyl/ || true
+                rsync -a ${BACKUP_DATA_DIR}/pterodactyl_panel/. /var/www/pterodactyl/ || true
             fi
             
+            # Pterodactyl Wings data
             if [ -d ${BACKUP_DATA_DIR}/pterodactyl_wings ]; then
+                echo "Restoring Pterodactyl Wings data..."
                 mkdir -p /var/lib/pterodactyl
-                cp -r ${BACKUP_DATA_DIR}/pterodactyl_wings/* /var/lib/pterodactyl/ || true
+                rsync -a ${BACKUP_DATA_DIR}/pterodactyl_wings/. /var/lib/pterodactyl/ || true
             fi
             
-            # Restore Nginx/Systemd configs
+            # Nginx Configuration (Nginx is now installed, so /etc/nginx exists)
             if [ -d ${BACKUP_DATA_DIR}/etc_nginx ]; then
                 echo "Restoring Nginx configuration..."
-                sudo cp -r ${BACKUP_DATA_DIR}/etc_nginx/* /etc/nginx/ || true
+                sudo rsync -a ${BACKUP_DATA_DIR}/etc_nginx/. /etc/nginx/ || true
             fi
             
+            # Custom Systemd Service Files
             if [ -d ${BACKUP_DATA_DIR}/etc_systemd ]; then
                 echo "Restoring systemd service files..."
-                sudo cp -r ${BACKUP_DATA_DIR}/etc_systemd/* /etc/systemd/system/ || true
-                sudo systemctl daemon-reload
+                sudo rsync -a ${BACKUP_DATA_DIR}/etc_systemd/. /etc/systemd/system/ || true
             fi
             
             # --- END RESTORATION OF PERSISTENT FOLDERS ---
@@ -148,11 +157,12 @@ jobs:
           
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          # Restart SSH using the installed systemctl utility
           sudo systemctl restart ssh || echo "SSH restart failed, continuing."
 
       - name: 🚀 Start Networking Services & Database
         run: |
-          # Start Database
+          # Start Database (systemctl now available)
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
           
           # Restore Pterodactyl Database
@@ -177,9 +187,7 @@ jobs:
               echo "Attempt $i/30: Socket not found. Sleeping 1 second..."
               sleep 1
               if [ "$i" -eq 30 ]; then
-                  echo "FATAL: Tailscale daemon failed to start within 30 seconds."
-                  # Exit 1 here would crash the entire job. Let's just log and continue for robustness.
-                  echo "WARNING: Tailscale daemon failed to start within 30 seconds. Tailscale services may not be available."
+                  echo "WARNING: Tailscale daemon failed to start within 30 seconds. Services may not be available."
                   break
               fi
           done
@@ -225,7 +233,6 @@ jobs:
           
           # --- DUMP DATABASE ---
           echo "Attempting to dump Pterodactyl database..."
-          # Start DB service just in case
           sudo systemctl start mariadb 2>/dev/null || true
           mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > ${BACKUP_DATA_DIR}/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED. Continuing."
           
@@ -246,59 +253,58 @@ jobs:
             echo "/incase directory does not exist yet. Skipping."
           fi
           
-          # 3. Pterodactyl Panel files
+          # 3. Pterodactyl Panel files (Using rsync for robust copy)
           echo "Copying Pterodactyl Panel files (if present)..."
           mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_panel
           if [ -d /var/www/pterodactyl ]; then
-            cp -a /var/www/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_panel/
+            rsync -a /var/www/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_panel/ || true
           fi
           
-          # 4. Pterodactyl Wings/Server data
+          # 4. Pterodactyl Wings/Server data (Using rsync for robust copy)
           echo "Copying Pterodactyl Wings/Server data (if present)..."
           mkdir -p ${BACKUP_DATA_DIR}/pterodactyl_wings
           if [ -d /var/lib/pterodactyl ]; then
-            cp -a /var/lib/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_wings/
+            rsync -a /var/lib/pterodactyl/. ${BACKUP_DATA_DIR}/pterodactyl_wings/ || true
           fi
           
-          # 5. Tailscale state (CRITICAL FIX: Use || true to prevent crash if file is missing)
+          # 5. Tailscale state (Crash-proof copy)
           echo "Copying Tailscale state (allowing failure if service is down)..."
           cp /var/lib/tailscale/tailscaled.state ${BACKUP_DATA_DIR}/ || true 
 
-          # 6. Nginx/Systemd configs
+          # 6. Nginx/Systemd configs (Using rsync for robust copy)
           sudo mkdir -p ${BACKUP_DATA_DIR}/etc_nginx ${BACKUP_DATA_DIR}/etc_systemd
-          if [ -d /etc/nginx ]; then sudo cp -a /etc/nginx/. ${BACKUP_DATA_DIR}/etc_nginx/; fi
-          if [ -d /etc/systemd/system ]; then sudo cp -a /etc/systemd/system/. ${BACKUP_DATA_DIR}/etc_systemd/; fi
+          if [ -d /etc/nginx ]; then sudo rsync -a /etc/nginx/. ${BACKUP_DATA_DIR}/etc_nginx/; fi
+          if [ -d /etc/systemd/system ]; then sudo rsync -a /etc/systemd/system/. ${BACKUP_DATA_DIR}/etc_systemd/; fi
 
           # --- ZIP THE STAGING AREA ---
           
           # Cleanup cache/temporary files before zipping
           rm -rf ${BACKUP_DATA_DIR}/root_home/.cache ${BACKUP_DATA_DIR}/root_home/.tmate.sock ${BACKUP_DATA_DIR}/root_home/.bash_history
           
-          # Set ownership for the host to handle the file
-          chown -R $USER:$USER ${BACKUP_DIR}
+          # Set ownership for the host to handle the file (user in container is root, but $USER might be runner)
+          chown -R $(whoami):$(whoami) ${BACKUP_DIR}
           
-          # Create the final zip archive in the root of the runner's workspace
-          zip -r /home/runner/work/${{ github.repository }}/${{ github.repository }}/backup.zip ${BACKUP_DIR}
+          # CRITICAL FIX: Zip the file directly in the workspace root, referencing the absolute path of the backup directory
+          zip -r backup.zip ${BACKUP_DIR}
  
-      - name: ✅ Atomic Force-Push New Backup to 'backup' Branch (FIXED GIT CONTEXT)
+      - name: ✅ Atomic Force-Push New Backup to 'backup' Branch (SHELL-NATIVE FIX)
         if: always()
         run: |
-          # CRITICAL FIX: Ensure we are in the repository root before running the Git action
+          # CRITICAL FIX: Ensure we are in the repository root (where checkout placed files)
           cd $GITHUB_WORKSPACE
           
-          /usr/bin/docker exec  \
-            -e GITHUB_TOKEN="${{ secrets.GH_TOKEN }}" \
-            -e GITHUB_REPOSITORY="${{ github.repository }}" \
-            -e GITHUB_SHA="${{ github.sha }}" \
-            -e INPUT_BRANCH="backup" \
-            -e INPUT_FORCE="true" \
-            -e GITHUB_WORKSPACE="${{ github.workspace }}" \
-            $(/usr/bin/docker ps -q --filter name=runner-container) \
-            /bin/bash -c " \
-              git config user.name 'github-actions[bot]'; \
-              git config user.email 'github-actions[bot]@users.noreply.github.com'; \
-              git add backup.zip; \
-              git commit -m '🤖 Automated Backup: Workflow ${{ github.run_id }}'; \
-              git push --force origin backup; \
-            " || true
-        # Using a custom git sequence here instead of ad-m/github-push-action to avoid container context issues
+          # Initialize git and force push the new backup.zip
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # Add the zip file created in the previous step
+          git add backup.zip
+          
+          # Check if there are any changes to commit before committing
+          if git status --porcelain | grep -q .; then
+            git commit -m '🤖 Automated Backup: Workflow ${{ github.run_id }}'
+            # Force push the new backup, creating the branch if necessary
+            git push --force origin backup || git push --force --set-upstream origin backup
+          else
+            echo "No changes in backup.zip, skipping commit."
+          fi
