@@ -19,11 +19,12 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory
+      - name: ⚙️ Install Core System Prerequisites & Setup Backup Directory (Adding rsync)
         run: |
           # Install core tools required for Debian-based runner
           apt update -y
-          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo
+          # CRITICAL FIX: Add rsync for reliable file persistence
+          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo rsync
 
           hostnamectl set-hostname root || true
           
@@ -52,7 +53,7 @@ jobs:
           rm -rf ${BACKUP_REPO_DIR}
           echo "::endgroup::"
           
-      - name: 🔄 Restore Files and Tailscale State (DOTFILE/ROOT FIX)
+      - name: 🔄 Restore Files and Tailscale State (rsync FIX)
         run: |
           echo "Restoring previous session files..."
           BACKUP_DATA_DIR="/opt/vps-backup/data"
@@ -64,23 +65,20 @@ jobs:
             
             # --- START RESTORATION OF PERSISTENT FOLDERS ---
             
-            # 🔑 CRITICAL FIX: Robustly restore /root home, including hidden files and folders.
+            # 🔑 CRITICAL FIX: Use rsync for robust restoration of /root home, including all hidden files/folders.
             if [ -d ${BACKUP_DATA_DIR}/root_home ];
             then
-                echo "Restoring /root contents..."
-                # 1. Copy all visible files/folders
-                cp -r ${BACKUP_DATA_DIR}/root_home/* /root/ || true 
-                # 2. Copy all hidden files/folders (excluding '.' and '..')
-                cp -r ${BACKUP_DATA_DIR}/root_home/.[!.]* /root/ || true 
+                echo "Restoring /root contents using rsync..."
+                # rsync -a copies everything recursively, preserves ownership/permissions, and handles dotfiles naturally.
+                rsync -a ${BACKUP_DATA_DIR}/root_home/. /root/ || true
             fi
             
-            # Restore /incase folder (applying the robust dotfile copy method)
+            # Restore /incase folder using rsync
             if [ -d ${BACKUP_DATA_DIR}/incase ];
             then
-                echo "Restoring /incase contents..."
+                echo "Restoring /incase contents using rsync..."
                 mkdir -p /incase
-                cp -r ${BACKUP_DATA_DIR}/incase/* /incase/ || true
-                cp -r ${BACKUP_DATA_DIR}/incase/.[!.]* /incase/ || true
+                rsync -a ${BACKUP_DATA_DIR}/incase/. /incase/ || true
             fi
             
             # Restore Pterodactyl Panel files (/var/www/pterodactyl)
@@ -227,7 +225,7 @@ jobs:
           
           # --- START COPYING LIVE DATA INTO STAGING ---
           
-          # 1. /root/ contents (This still uses cp -a to preserve ownership/permissions)
+          # 1. /root/ contents (cp -a copies everything recursively, including dotfiles and preserves ownership/permissions)
           echo "Copying /root directory contents..."
           mkdir -p ${BACKUP_DATA_DIR}/root_home
           cp -a /root/. ${BACKUP_DATA_DIR}/root_home/
@@ -276,7 +274,7 @@ jobs:
           # Create the final zip archive in the root of the runner's workspace
           zip -r /home/runner/work/${{ github.repository }}/${{ github.repository }}/backup.zip ${BACKUP_DIR}
  
-      # FIX: Replaced unreliable PR/Merge steps with a single, atomic force-push
+      # FIX: Use the reliable Atomic Force-Push
       - name: ✅ Atomic Force-Push New Backup to 'backup' Branch
         if: always()
         uses: ad-m/github-push-action@master
