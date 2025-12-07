@@ -29,7 +29,7 @@ jobs:
           apt update -y
           # CRITICAL FIX: Install systemd-sysv to provide the 'systemctl' command
           # CRITICAL FIX: Install Nginx, PHP, and other core components for Pterodactyl setup
-          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo rsync nginx systemd-sysv lsb-release ca-certificates gnupg software-properties-common
+          apt install -y tmate curl unzip net-tools neofetch git mariadb-server zip sudo rsync nginx systemd-sysv lsb-release ca-certificates gnupg software-properties-common bash
 
           # Install Pterodactyl dependencies (PHP components often required for panel files)
           # Note: Pterodactyl Panel installation is usually complex, but we install packages to create necessary dirs/binaries
@@ -161,6 +161,8 @@ jobs:
           sudo systemctl restart ssh || echo "SSH restart failed, continuing."
 
       - name: 🚀 Start Networking Services & Database
+        # CRITICAL FIX: Explicitly use bash to enable 'disown' and robust backgrounding
+        shell: /bin/bash {0} 
         run: |
           # Start Database (systemctl now available)
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
@@ -172,14 +174,18 @@ jobs:
               mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
-          # Start Tailscale Daemon using systemctl for reliability
+          # --- FIX: Run tailscaled directly with nohup/disown for container resilience ---
           TS_SOCK="/var/run/tailscale/tailscaled.sock"
-          echo "Starting Tailscale daemon using systemctl..."
-          sudo systemctl start tailscaled || echo "Tailscaled systemctl start failed, trying manual start."
-          
+          TS_STATE_DIR="/var/lib/tailscale"
+          echo "Starting Tailscale daemon directly in background..."
+          # Run daemon in the background, redirect output to ensure it doesn't block
+          # and explicitly specify the state directory.
+          # Use nohup/disown to detach it robustly from the action script process
+          nohup tailscaled --state=${TS_STATE_DIR}/tailscaled.state > /dev/null 2>&1 & disown
+
           # Wait loop for the daemon socket to appear (Increased wait time)
           echo "Waiting for Tailscale daemon socket to appear at $TS_SOCK..."
-          for i in $(seq 1 45); do # Increased from 30 to 45 seconds
+          for i in $(seq 1 45); do 
               if [ -S "$TS_SOCK" ]; then
                   echo "Tailscale daemon is running. Proceeding."
                   break
@@ -198,15 +204,15 @@ jobs:
 
           # Start Cloudflare Tunnel
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
-          # CRITICAL: Run cloudflared in the background with disown to keep it alive
+          # CRITICAL: Run cloudflared in the background with disown (now supported by bash)
           /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" & disown
           
           # Start Playit.gg
-          playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & 
+          playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & disown
           
           # Start Tailscale Funnel
           echo "Starting Tailscale Funnel on port 80..."
-          tailscale funnel 8080 on &
+          tailscale funnel 8080 on & disown
 
           sleep 5
 
@@ -220,6 +226,7 @@ jobs:
           echo "------------------------------------------"
           echo "📍 Tailscale MagicDNS Name: root"
           echo "💻 Tailscale IP (Internal VPN):"
+          # This should now work as the daemon is started directly
           tailscale ip -4 || echo "Tailscale IP not found"
           echo "=========================================="
  
