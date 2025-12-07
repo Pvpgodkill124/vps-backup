@@ -180,8 +180,12 @@ jobs:
           # Restore Pterodactyl Database
           if [ -f /opt/vps-backup/data/pterodactyl_db.sql ];
           then
+              # --- CRITICAL FIX: Create 'panel' database before importing ---
+              echo "Creating Pterodactyl 'panel' database (if it doesn't exist)..."
+              mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} --socket=${MYSQL_SOCK_FILE} -e "CREATE DATABASE IF NOT EXISTS panel;" || echo "Failed to create 'panel' database. Continuing."
+              
               echo "Re-importing Pterodactyl database..."
-              # Use the mysql client, explicitly passing the correct socket path
+              # Import the data into the now-existing database
               mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} --socket=${MYSQL_SOCK_FILE} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
